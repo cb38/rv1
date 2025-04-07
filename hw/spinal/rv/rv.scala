@@ -98,7 +98,67 @@ case class RVFI() extends Bundle {
         this
     }
 }
-class RV (hasFormal : Boolean = false) extends Component {
+
+
+case class RVConfig(
+                supportMul      : Boolean = false,
+                supportDiv      : Boolean = false,
+                supportCsr      : Boolean = false,
+                supportFormal   : Boolean = false,
+                supportFence    : Boolean = false,
+                supportAsyncReg : Boolean = false,
+                supportRegInit  : Boolean = false,
+                pcSize          : Int     = 32,
+                dataAddrSize    : Int     = 32,
+                reflopDataRsp   : Boolean = true
+                ) {
+
+    def hasMul      = supportMul
+    def hasDiv      = supportDiv
+    def hasCsr      = supportCsr
+    def hasFence    = supportFence
+
+    def hasAsyncReg = supportAsyncReg
+    def hasRegInit  = supportRegInit
+
+    def hasFormal   = supportFormal
+}
+
+case class InstrReqIntfc(config: RVConfig) extends Bundle() {
+
+        val valid       = out(Bool)
+        val ready       = in(Bool)
+        val addr        = out(UInt(config.pcSize bits))
+}
+
+case class InstrRspIntfc(config: RVConfig) extends Bundle() {
+
+        val valid       = in(Bool)
+        val data        = in(Bits(32 bits))
+}
+
+case class DataReqIntfc(config: RVConfig) extends Bundle() {
+
+        val valid       = out(Bool)
+        val ready       = in(Bool)
+        
+        val rden        = out(Bool)
+        val rdaddr      = out(UInt(config.dataAddrSize bits))
+        val wraddr      = out(UInt(config.dataAddrSize bits))
+        val wren        = out(Bool)
+        
+        val size        = out(Bits(2 bits))
+        val data        = out(Bits(32 bits))
+
+}
+
+case class DataRspIntfc(config: RVConfig) extends Bundle() {
+
+        val valid       = in(Bool)
+        val data        = in(Bits(32 bits))
+}
+
+class RV (config: RVConfig) extends Component {
  
   val fetch, decode, execute = CtrlLink()
   val f2d = StageLink(fetch.down, decode.up)
@@ -106,7 +166,21 @@ class RV (hasFormal : Boolean = false) extends Component {
   // payload
   val INSTRUCTION = Payload(Bits(32 bits))
   val PC = Payload(Bits(32 bits))
-  val rvfi = if (hasFormal) Payload(RVFI()) else null
+  val rvfi = if (config.hasFormal) Payload(RVFI()) else null
+
+  // I/O
+  val io = new Bundle {
+    val IO = out(UInt(32 bits)).simPublic()
+    val rvfi = if (config.hasFormal) out(Reg(RVFI()) init).setName("rvfi") else null
+    //val exit = out(Reg(Bool)).init(False)
+
+    val instr_req = InstrReqIntfc(config).setName("instr_req")
+    val instr_rsp = InstrRspIntfc(config).setName("instr_rsp")
+
+    val data_req  = DataReqIntfc(config).setName("data_req")
+    val data_rsp  = DataRspIntfc(config).setName("data_rsp")
+ }
+
 
   // general
   val Iptr = Reg(UInt(32 bits)) init(0)
@@ -138,62 +212,68 @@ class RV (hasFormal : Boolean = false) extends Component {
     RegMem.write(rd_wr_addr, rd_wr_data, rd_wr)
   }
   
-  val io = new Bundle {
-    val IO = out(UInt(32 bits)).simPublic()
-    val rvfi = if (hasFormal) out(Reg(RVFI()) init).setName("rvfi") else null
-    //val exit = out(Reg(Bool)).init(False)
-    }
+ 
   //mem
   val memory = new Area {
-    var delay = 1 // delay for read access 
-    val rdDelay = Reg(UInt(2 bits)) init (delay)
-    val done = rdDelay===0
+   
+    val done = Bool
     val rdData = Bits(32 bits)
     val rdInst = Bits(32 bits)
     
     val wrData = B"h00000000"
     val wrEn = False
-    val rdAddrD = U"0000000000"
-    val rdAddrI = U"0000000000"
-    val wrAddr = U"0000000000"
-    
+    val rdAddrD = UInt(config.dataAddrSize bits)
+    val rdAddrI = UInt(config.dataAddrSize bits)
+    val wrAddr  = UInt(config.dataAddrSize bits)
+    val wrSize = Bits(2 bits)
+    rdAddrD := 0
+    rdAddrI := 0
+    wrAddr := 0
+    wrSize := 0
+
     when (!init) {
       isFetch := False
     }
-    val memConfig = MemConfig(memorySize = 1024, dataWidth = 32)
-    val mem = new MultiPortMem_1w_2rs(memConfig, writeFirst)
-    mem.io.wr0.addr:= wrAddr
-    mem.io.wr0.data:= wrData
-    mem.io.wr0.ena := wrEn
+    // data memory
+    io.data_req.wraddr := wrAddr.resized
+    io.data_req.wren   := wrEn
+    io.data_req.size := wrSize
+    io.data_req.data := wrData
+    io.data_req.rdaddr := rdAddrD.resized
+    io.data_req.rden := isData
+    io.data_req.valid := isData | wrEn
 
-    mem.io.rd1.addr:= rdAddrD
-    mem.io.rd1.ena := isData
-    rdData := mem.io.rd1.data
+    rdData := io.data_rsp.data
+    
+    // instruction memory 
+    io.instr_req.addr  := rdAddrI.resized 
+    io.instr_req.valid := isFetch
+    rdInst  := io.instr_rsp.data
+    
+    done := io.data_rsp.valid
 
-    mem.io.rd0.addr := rdAddrI
-    mem.io.rd0.ena := isFetch
-    rdInst  := mem.io.rd0.data
- 
-    def WriteData(addr: UInt, data: Bits, stall : Boolean = false ) = {
+    def WriteData(addr: UInt, data: Bits, size : Bits, stall : Boolean = false ) = {
       wrAddr := addr.resized
       wrData := data
       wrEn := True
+      wrSize := size
       if (stall) {
         execute.haltIt()
       }
     }
     def ReadData(addr: UInt) = {
       rdAddrD := addr.resized
+      //when (io.data_req.ready) (isData := True)
       isData := True
     }
+    
+    when ( !io.data_req.ready)  (execute.haltIt())
 
     when(isData === True) {
-      rdDelay := rdDelay - 1 
-      when (rdDelay > 0 ) (execute.haltIt())
+      
+      when ( !io.data_rsp.valid)  (execute.haltIt())
     }
-    when(rdDelay === 0) {
-        rdDelay := delay
-      }
+    
    }  
   
   val fetcher = new fetch.Area {
@@ -208,7 +288,7 @@ class RV (hasFormal : Boolean = false) extends Component {
     up.valid := RegNext(isFetch).init(False)
     // pc
      when(up.isFiring ) (Iptr := Iptr + 4)
-     when (init) (memory.rdAddrI := (Iptr |>> 2).resized)
+     when (init) (memory.rdAddrI := (Iptr).resized)
      PC := (Iptr-4).asBits 
 
     // push instruction to fifo   
@@ -430,7 +510,7 @@ class RV (hasFormal : Boolean = false) extends Component {
       RegFile.rs2_rd      := rs2_valid
       RegFile.rs2_rd_addr := rs2_addr
 
-     val formal = if (hasFormal) new Area {
+     val formal = if (config.hasFormal) new Area {
 
         val order = Reg(UInt(64 bits)) init(0)
         when(isValid){
@@ -619,7 +699,7 @@ class RV (hasFormal : Boolean = false) extends Component {
 
     val lsu = new Area {
 
-       // val lsu_stall = Bool
+        val lsu_stall = Bool
 
         val rd_wr    = False
         val rd_wdata = UInt(32 bits)
@@ -637,7 +717,7 @@ class RV (hasFormal : Boolean = false) extends Component {
             B"01" -> rs2(15 downto 0) ## rs2(15 downto 0),
             default -> rs2
           )                       
-          memory.WriteData(lsu_addr, mem_wdata)
+          memory.WriteData(lsu_addr, mem_wdata, size)
         }
         when (itype === InstrType.L) {
           memory.ReadData(lsu_addr)
@@ -659,7 +739,7 @@ class RV (hasFormal : Boolean = false) extends Component {
         
     }
 
-    val rd_wr    = decoder.down.valid && (alu.rd_wr | jump.rd_wr | shift.rd_wr | lsu.rd_wr ) && (rd_addr =/= 0)
+    val rd_wr    = execute.isValid && (alu.rd_wr | jump.rd_wr | shift.rd_wr | lsu.rd_wr ) && (rd_addr =/= 0)
     val rd_waddr = rd_addr
     val rd_wdata = B((alu.rd_wdata.range   -> alu.rd_wr))   & B(alu.rd_wdata)   |
                    B((jump.rd_wdata.range  -> jump.rd_wr))  & B(jump.rd_wdata)  |
@@ -673,9 +753,9 @@ class RV (hasFormal : Boolean = false) extends Component {
     RegFile.rd_wr_data  := rd_wdata.asBits
     
     // FORMAL
-    val formal = if (hasFormal) new Area {
+    val formal = if (config.hasFormal) new Area {
 
-        io.rvfi.valid := isValid
+        io.rvfi.valid := RegNext(isValid)
 
         when(isValid){
             io.rvfi.order     := rvfi.order
@@ -721,19 +801,17 @@ class RV (hasFormal : Boolean = false) extends Component {
                 }
             }
             is(InstrType.L){
-                when(isValid){
+                when(isValid ){
                    val size     = B(funct3(1 downto 0))
                     io.rvfi.mem_addr  := lsu.lsu_addr(31 downto 2) @@ U"00"
-                    io.rvfi.mem_rmask := ((size === B"00") ? B"0001" |
-                                      ((size === B"01") ? B"0011" |
-                                                                      B"1111")) |<< lsu.lsu_addr(1 downto 0)
+                    io.rvfi.mem_rmask := ((size === B"00") ? B"0001" |  ((size === B"01") ? B"0011" |  B"1111")) |<< lsu.lsu_addr(1 downto 0)
 
                     io.rvfi.trap      := (size === B"01" && lsu.lsu_addr(0)) |
                                       (size === B"10" && !(lsu.lsu_addr(1 downto 0) === 0))
                 }
             }
             is(InstrType.S){
-                when(isValid){
+                when(isValid ){
                    val size     = B(funct3(1 downto 0))
                     io.rvfi.mem_addr  := lsu.lsu_addr(31 downto 2) @@ U"00"
                     io.rvfi.mem_wmask := ((size === B"00") ? B"0001" |
@@ -804,7 +882,9 @@ object Assembler {
         case "lw"     =>   regNumber(tokens(3)) << 15 | toInt(tokens(2)) << 20 | 0x2 <<12 | regNumber(tokens(1)) << 7 | 0x03
         case "sw"     =>   regNumber(tokens(3)) << 15 | toInt(tokens(2)) << 7  | 0x2 <<12 | regNumber(tokens(1)) << 20 | 0x23
         case "lhu"   =>   regNumber(tokens(3)) << 15 | toInt(tokens(2)) << 20  | 0x5 <<12 | regNumber(tokens(1)) << 7 | 0x03
-       
+        case "lb"   =>   regNumber(tokens(3)) << 15 | toInt(tokens(2)) << 20  | 0x0 <<12 | regNumber(tokens(1)) << 7 | 0x03
+        case "lbu"   =>   regNumber(tokens(3)) << 15 | toInt(tokens(2)) << 20  | 0x4 <<12 | regNumber(tokens(1)) << 7 | 0x03
+        case "sb"   =>   regNumber(tokens(3)) << 15 | toInt(tokens(2)) << 7  | 0x0 <<12 | regNumber(tokens(1)) << 20 | 0x23
         case "" => // println("Empty line")
         case t: String => throw new Exception("Assembler error: unknown instruction")
         case _ => throw new Exception("Assembler error")
@@ -835,49 +915,135 @@ object Assembler {
 
 object RVVerilog extends App {
   val config=SpinalConfig(device=Device.XILINX,targetDirectory = "hw/gen",mergeAsyncProcess = true)
-  config.generateVerilog(new RV(true))
+ 
+  config.generateVerilog(new RV(config = RVConfig(supportFormal = true,
+                                                 supportMul = false,
+                                                 supportDiv = false,
+                                                 supportCsr = false)))
 }
+
+class TopRV(config: RVConfig) extends Component {
+    val io = new Bundle {
+        //val osc_clk = in(Bool)
+
+        val led1    = out(Bool)
+        val led2    = out(Bool)
+        val led3    = out(Bool)
+
+        val switch = in(Bool)
+    }
+
+    
+    
+
+    val core = new Area {
+
+        val rv = new RV(config)        
+        val cfg = MemConfig(memorySize = 1024, dataWidth = 32)
+        val cpu_ram = new MultiPortMem_1w_2rs( cfg , writeFirst)
+       
+        // memory connections
+        /// instruction memory
+        rv.io.instr_req.ready   := True
+        
+        rv.io.instr_rsp.valid   := RegNext(rv.io.instr_req.valid) init(False)
+        cpu_ram.io.rd1.addr     := (rv.io.instr_req.addr |>>2).resized
+        cpu_ram.io.rd1.ena      := rv.io.instr_req.valid 
+        rv.io.instr_rsp.data    := cpu_ram.io.rd1.data
+
+        // data memory
+        rv.io.data_req.ready := True
+        rv.io.data_rsp.valid := RegNext(rv.io.data_req.valid) init(False)
+
+
+
+
+        val wmask = rv.io.data_req.size.mux(
+                        B"00"   -> B"0001",
+                        B"01"   -> B"0011",
+                        default -> B"1111") |<< rv.io.data_req.wraddr(1 downto 0)
+
+        cpu_ram.io.wr0.mask    := wmask
+
+        cpu_ram.io.wr0.addr      := (rv.io.data_req.wraddr >> 2).resized
+        cpu_ram.io.wr0.ena       := rv.io.data_req.valid && rv.io.data_req.wren 
+        cpu_ram.io.wr0.data      := rv.io.data_req.data
+        cpu_ram.io.rd0.addr      := (rv.io.data_req.rdaddr >> 2).resized
+        cpu_ram.io.rd0.ena       := rv.io.data_req.valid && rv.io.data_req.rden
+        rv.io.data_rsp.data      := cpu_ram.io.rd0.data.resized
+
+        val update_leds = rv.io.data_req.valid && rv.io.data_req.wren && rv.io.data_req.wraddr(9)
+
+        io.led1 := RegNextWhen(rv.io.data_req.data(0), update_leds) init(False)
+        io.led2 := RegNextWhen(rv.io.data_req.data(1), update_leds) init(False)
+        io.led3 := RegNextWhen(rv.io.data_req.data(2), update_leds) init(False)
+      }
+
+     
+
+    
+}
+
+
+object RVTopVerilog extends App {
+  val config=SpinalConfig(device=Device.XILINX,targetDirectory = "hw/gen",mergeAsyncProcess = true)
+ 
+  config.generateVerilog(new TopRV(config = RVConfig(supportFormal = true,
+                                                 supportMul = false,
+                                                 supportDiv = false,
+                                                 supportCsr = false)))
+}
+
 object RVSim extends App {
   
      val program = Assembler.assemble("asm/RV.asm")
-     //val program = Assembler.assemble("asm/tp2.asm")
+   
      
 
 
-   SimConfig.withFstWave.compile(new RV(true)).doSim(seed = 2){ dut =>
-  val mem = dut.memory.mem
+   SimConfig.withFstWave.compile(new TopRV(config = RVConfig(supportFormal = false,
+                                                 supportMul = false,
+                                                 supportDiv = false,
+                                                 supportCsr = false) )).doSim(seed = 2){ dut =>
+  val mem = dut.core.cpu_ram
    for (i <- 0 until program.length) {
             mem.u_mem_bank0.u_mem.setBigInt(i, program(i))
+            mem.u_mem_bank1.u_mem.setBigInt(i, program(i))
+            
         }
   // fill the rest of memory with 0
   for (i <- program.length until 1024) {
             mem.u_mem_bank0.u_mem.setBigInt(i, 0)
+            mem.u_mem_bank1.u_mem.setBigInt(i, 0)
+            
         }      
   dut.clockDomain.forkStimulus(10)
-  var run = 20
+  var run = 50
   // init Regfile
   for (j <- 0 until 32 ) {
-    dut.RegFile.RegMem.setBigInt(j,0)
+    dut.core.rv.RegFile.RegMem.setBigInt(j,0)
     println()
   }
 
-   while(run>0 && dut.decoder.instr.toBigInt != 0 ) {
+   while(run>0 && dut.core.rv.decoder.instr.toBigInt != 0 ) {
         dut.clockDomain.waitSampling(1)
         run -= 1
-        if (dut.decoder.valid.toBoolean)  {
-             printf("PC: %08X, INST: %08X",dut.decoder.pc.toBigInt, dut.decoder.instr.toBigInt)
+        if (dut.core.rv.decoder.valid.toBoolean)  {
+             printf("PC: %08X, INST: %08X",dut.core.rv.decoder.pc.toBigInt, dut.core.rv.decoder.instr.toBigInt)
              println()
         }
     }
-  // read value from mem
+  // read value from regfile
   println("value of Regfile at the  end of simu") 
   for (j <- 0 until 32 by 2) {
-    printf("x%02d:  %08X   x%02d:  %08X ", j,dut.RegFile.RegMem.getBigInt(j),j+1,dut.RegFile.RegMem.getBigInt(j+1))
+    printf("x%02d:  %08X   x%02d:  %08X ", j,dut.core.rv.RegFile.RegMem.getBigInt(j),j+1,dut.core.rv.RegFile.RegMem.getBigInt(j+1))
     println()
   }
-  
-
-  //assert A is 0x0
-  //assert(dut.A.toBigInt == 0,"A shall be zero at the end of a test case.\n")
+  // read value from memory
+    println("value of memory at the  end of simu")
+    for (j <- 14 until 32 by 2) {
+        printf("mem[%02d]:  %08X   mem[%02d]:  %08X ", j,mem.u_mem_bank0.u_mem.getBigInt(j),j+1,mem.u_mem_bank0.u_mem.getBigInt(j+1))
+        println()  
+    } 
  }
 }

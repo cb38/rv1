@@ -30,9 +30,10 @@ case class MemWr(config: MemConfig) extends Bundle with IMasterSlave
     val ena         = Bool
     val addr        = UInt(config.addrWidth bits)
     val data        = Bits(config.dataWidth bits)
+    val mask        = Bits(config.dataWidth/8 bits)
 
     override def asMaster(): Unit = {
-        out(ena, addr, data)
+        out(ena, addr, data, mask)
     }
 }
 
@@ -42,6 +43,7 @@ class Mem_1w_1rs(config: MemConfig, readUnderWrite: ReadUnderWritePolicy = dontC
         val wr_ena    = in(Bool)
         val wr_addr   = in(UInt(config.addrWidth bits))
         val wr_data   = in(Bits(config.dataWidth bits))
+        val wr_mask   = in(Bits(config.dataWidth/8 bits))
 
         val rd_ena    = in(Bool)
         val rd_addr   = in(UInt(config.addrWidth bits))
@@ -52,7 +54,8 @@ class Mem_1w_1rs(config: MemConfig, readUnderWrite: ReadUnderWritePolicy = dontC
     u_mem.write(
         enable    = io.wr_ena,
         address   = io.wr_addr,
-        data      = io.wr_data
+        data      = io.wr_data,
+        mask      = io.wr_mask
     )
 
     val rd_data_mem = u_mem.readSync(
@@ -92,6 +95,7 @@ class MultiPortMem_1w_2rs(config: MemConfig, readUnderWrite: ReadUnderWritePolic
     u_mem_bank0.io.wr_ena    <> io.wr0.ena
     u_mem_bank0.io.wr_addr   <> io.wr0.addr
     u_mem_bank0.io.wr_data   <> io.wr0.data
+    u_mem_bank0.io.wr_mask   <> io.wr0.mask
 
     u_mem_bank0.io.rd_ena    <> io.rd0.ena
     u_mem_bank0.io.rd_addr   <> io.rd0.addr
@@ -105,6 +109,7 @@ class MultiPortMem_1w_2rs(config: MemConfig, readUnderWrite: ReadUnderWritePolic
     u_mem_bank1.io.wr_ena    <> io.wr0.ena
     u_mem_bank1.io.wr_addr   <> io.wr0.addr
     u_mem_bank1.io.wr_data   <> io.wr0.data
+    u_mem_bank1.io.wr_mask   <> io.wr0.mask
 
     u_mem_bank1.io.rd_ena    <> io.rd1.ena
     u_mem_bank1.io.rd_addr   <> io.rd1.addr
