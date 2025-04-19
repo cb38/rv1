@@ -187,8 +187,8 @@ class RV (config: RVConfig) extends Component {
   val flush = Bool()
   val init = RegInit(False)
   init := True  
-  val isFetch = True
-  val isData = False
+  
+  //val isData = False
   
   // register file
   val RegFile =  new Area {
@@ -215,65 +215,58 @@ class RV (config: RVConfig) extends Component {
  
   //mem
   val memory = new Area {
-   
-    val done = Bool
+   val isFetch = True
+
+    val readDone = Bool
     val rdData = Bits(32 bits)
     val rdInst = Bits(32 bits)
     
-    val wrData = B"h00000000"
-    val wrEn = False
-    val rdAddrD = UInt(config.dataAddrSize bits)
+    // data memory
+    io.data_req.wren := False
+    io.data_req.rden := False
+
+    io.data_req.valid := False
+    io.data_req.rdaddr := 0
+    io.data_req.wraddr := 0
+    io.data_req.size := B"00"
+    io.data_req.data := 0
+
+
+    rdData := io.data_rsp.data
+    readDone := io.data_rsp.valid
+    when ( io.data_req.valid && !io.data_req.ready)  (execute.haltIt())
+   
+    
+    def WriteData(addr: UInt, data: Bits, size : Bits) = {
+      io.data_req.wraddr := addr.resized
+      io.data_req.data := data
+      io.data_req.wren  := True
+      io.data_req.size  := size
+      io.data_req.valid := True
+      
+     
+    }
+    def ReadData(addr: UInt) = {
+       io.data_req.rdaddr  := addr.resized 
+       io.data_req.rden  := True
+       io.data_req.valid := True
+    }
+    
+     // instruction memory 
+
     val rdAddrI = UInt(config.dataAddrSize bits)
-    val wrAddr  = UInt(config.dataAddrSize bits)
-    val wrSize = Bits(2 bits)
-    rdAddrD := 0
     rdAddrI := 0
-    wrAddr := 0
-    wrSize := 0
 
     when (!init) {
       isFetch := False
     }
-    // data memory
-    io.data_req.wraddr := wrAddr.resized
-    io.data_req.wren   := wrEn
-    io.data_req.size := wrSize
-    io.data_req.data := wrData
-    io.data_req.rdaddr := rdAddrD.resized
-    io.data_req.rden := isData
-    io.data_req.valid := isData | wrEn
 
-    rdData := io.data_rsp.data
-    
-    // instruction memory 
+
     io.instr_req.addr  := rdAddrI.resized 
     io.instr_req.valid := isFetch
     rdInst  := io.instr_rsp.data
     
-    done := io.data_rsp.valid
 
-    def WriteData(addr: UInt, data: Bits, size : Bits, stall : Boolean = false ) = {
-      wrAddr := addr.resized
-      wrData := data
-      wrEn := True
-      wrSize := size
-      if (stall) {
-        execute.haltIt()
-      }
-    }
-    def ReadData(addr: UInt) = {
-      rdAddrD := addr.resized
-      //when (io.data_req.ready) (isData := True)
-      isData := True
-    }
-    
-    when ( !io.data_req.ready)  (execute.haltIt())
-
-    when(isData === True) {
-      
-      when ( !io.data_rsp.valid)  (execute.haltIt())
-    }
-    
    }  
   
   val fetcher = new fetch.Area {
@@ -285,7 +278,7 @@ class RV (config: RVConfig) extends Component {
     val delayFiring = RegNext (up.isFiring)
     val delayFiring2 = RegNext (delayFiring)
     
-    up.valid := RegNext(isFetch).init(False)
+    up.valid := RegNext(memory.isFetch).init(False)
     // pc
      when(up.isFiring ) (Iptr := Iptr + 4)
      when (init) (memory.rdAddrI := (Iptr).resized)
@@ -566,9 +559,6 @@ class RV (config: RVConfig) extends Component {
     val rd_addr     = RD_ADDR_FINAL
     
 
-    
-
-
     val pc = PC.asUInt.simPublic()
     val valid = Bool().simPublic()
     valid := up.isValid
@@ -721,7 +711,7 @@ class RV (config: RVConfig) extends Component {
         }
         when (itype === InstrType.L) {
           memory.ReadData(lsu_addr)
-           when (memory.done === True) {
+           when (memory.readDone === True) {
             rd_wr    := True  
             val ld_data_signed = !funct3(2)
             val rsp_data_shift_adj = Bits(32 bits)
@@ -919,7 +909,7 @@ object RVVerilog extends App {
   config.generateVerilog(new RV(config = RVConfig(supportFormal = true,
                                                  supportMul = false,
                                                  supportDiv = false,
-                                                 supportCsr = false)))
+                                                 supportCsr = false))).printPruned()
 }
 
 class TopRV(config: RVConfig) extends Component {
