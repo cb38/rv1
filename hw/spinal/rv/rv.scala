@@ -192,9 +192,9 @@ class RV (config: RVConfig) extends Component {
   
   // register file
   val RegFile =  new Area {
-    val rs1_rd      = Bool
+   // val rs1_rd      = Bool
     val rs1_rd_addr = UInt(5 bits)
-    val rs2_rd      = Bool
+   // val rs2_rd      = Bool
     val rs2_rd_addr = UInt(5 bits)
     val rs1_data    = Bits(32 bits)
     val rs2_data    = Bits(32 bits)
@@ -216,7 +216,6 @@ class RV (config: RVConfig) extends Component {
   //mem
   val memory = new Area {
    val isFetch = True
-
     val readDone = Bool
     val rdData = Bits(32 bits)
     val rdInst = Bits(32 bits)
@@ -224,49 +223,36 @@ class RV (config: RVConfig) extends Component {
     // data memory
     io.data_req.wren := False
     io.data_req.rden := False
-
     io.data_req.valid := False
     io.data_req.rdaddr := 0
     io.data_req.wraddr := 0
     io.data_req.size := B"00"
     io.data_req.data := 0
-
-
     rdData := io.data_rsp.data
     readDone := io.data_rsp.valid
     when ( io.data_req.valid && !io.data_req.ready)  (execute.haltIt())
-   
-    
+
     def WriteData(addr: UInt, data: Bits, size : Bits) = {
       io.data_req.wraddr := addr.resized
       io.data_req.data := data
       io.data_req.wren  := True
       io.data_req.size  := size
       io.data_req.valid := True
-      
-     
     }
     def ReadData(addr: UInt) = {
        io.data_req.rdaddr  := addr.resized 
        io.data_req.rden  := True
        io.data_req.valid := True
     }
-    
      // instruction memory 
-
     val rdAddrI = UInt(config.dataAddrSize bits)
     rdAddrI := 0
-
-    when (!init) {
-      isFetch := False
-    }
-
 
     io.instr_req.addr  := rdAddrI.resized 
     io.instr_req.valid := isFetch
     rdInst  := io.instr_rsp.data
+    when (!init) (isFetch := False)
     
-
    }  
   
   val fetcher = new fetch.Area {
@@ -401,7 +387,6 @@ class RV (config: RVConfig) extends Component {
         }
         is(Opcodes.ALU){
             iformat         := InstrFormat.R
-
             switch(funct7 ## funct3.asBits){
                 is(B"0000000_000", B"0100000_000"){
                     // ADD, SUB
@@ -454,8 +439,8 @@ class RV (config: RVConfig) extends Component {
                         (iformat === InstrFormat.U) ||
                         (iformat === InstrFormat.J) ||
                         (iformat === InstrFormat.Shamt))
-      val rd_valid_final = Bool()
-      rd_valid_final := rd_valid && !trap
+      //val rd_valid_final = Bool()
+      //rd_valid_final := rd_valid && !trap
 
       val rd_addr_final = Bits(5 bits)
       rd_addr_final :=  rd_valid ? rd_addr.asBits | B"00000"
@@ -498,9 +483,9 @@ class RV (config: RVConfig) extends Component {
       val ITYPE = insert(itype)
     
       // register file
-      RegFile.rs1_rd      := rs1_valid
+     // RegFile.rs1_rd      := rs1_valid
       RegFile.rs1_rd_addr := rs1_addr
-      RegFile.rs2_rd      := rs2_valid
+     // RegFile.rs2_rd      := rs2_valid
       RegFile.rs2_rd_addr := rs2_addr
 
      val formal = if (config.hasFormal) new Area {
@@ -540,7 +525,6 @@ class RV (config: RVConfig) extends Component {
   val exec = new execute.Area {
 
     import decoder._
-
     val itype           = InstrType()
     val instr           = Bits(32 bits)
     val funct3          = Bits(3 bits)
@@ -553,13 +537,11 @@ class RV (config: RVConfig) extends Component {
     val op1_op2_lsb = OP1_OP2_LSB
     val op1         = op1_33(31 downto 0)
     val op2         = op2_33(31 downto 0)
-    
     val rs2         = RS2_IMM
     val imm         = S(rs2(20 downto 0))
     val rd_addr     = RD_ADDR_FINAL
-    
 
-    val pc = PC.asUInt.simPublic()
+   // val pc = PC.asUInt.simPublic()
     val valid = Bool().simPublic()
     valid := up.isValid
     flush := False 
@@ -626,27 +608,20 @@ class RV (config: RVConfig) extends Component {
         val take_jump     = False
         val pc_jump_valid = False
         val pc_jump       = UInt(32 bits)
-
         val clr_lsb = False
 
         val pc       = UInt(32 bits)
         val pc_op1   = SInt(32 bits)
-
         pc          := PC.asUInt
         pc_op1      := S(pc)
-
         val pc_plus4 = pc + 4
-
-
         val rd_wr    = False
         val rd_wdata = pc_plus4.resize(32)
         when (isValid) {
           switch(itype){
             is(InstrType.B){
-
                 val op1_eq_op2 = (op1 === op2)
                 val op1_lt_op2 = alu.rd_wdata_alu_lt(0)
-
                 val branch_cond = False
                 switch(funct3){
                     is(B"000")       { branch_cond :=  op1_eq_op2 } // BEQ
@@ -654,21 +629,18 @@ class RV (config: RVConfig) extends Component {
                     is(B"100",B"110"){ branch_cond :=  op1_lt_op2 } // BLT, BLTU
                     is(B"101",B"111"){ branch_cond := !op1_lt_op2 } // BGE, BGEU
                 }
-
                 pc_jump_valid := True
                 take_jump     := branch_cond
             }
             is(InstrType.JAL){
                 pc_jump_valid := True
                 take_jump     := True
-
                 rd_wr    := True
             }
             is(InstrType.JALR){
                 pc_jump_valid := True
                 pc_op1        := op1
                 take_jump     := True
-
                 clr_lsb  := True
                 rd_wr    := True
             }
@@ -686,10 +658,7 @@ class RV (config: RVConfig) extends Component {
         
     }
   
-
     val lsu = new Area {
-
-        val lsu_stall = Bool
 
         val rd_wr    = False
         val rd_wdata = UInt(32 bits)
@@ -728,7 +697,6 @@ class RV (config: RVConfig) extends Component {
         }
         
     }
-
     val rd_wr    = execute.isValid && (alu.rd_wr | jump.rd_wr | shift.rd_wr | lsu.rd_wr ) && (rd_addr =/= 0)
     val rd_waddr = rd_addr
     val rd_wdata = B((alu.rd_wdata.range   -> alu.rd_wr))   & B(alu.rd_wdata)   |
@@ -737,7 +705,6 @@ class RV (config: RVConfig) extends Component {
                    B((lsu.rd_wdata.range   -> lsu.rd_wr))   & B(lsu.rd_wdata)
 
     // register file
-  
     RegFile.rd_wr       := rd_wr
     RegFile.rd_wr_addr  := rd_waddr.asUInt
     RegFile.rd_wr_data  := rd_wdata.asBits
@@ -773,8 +740,7 @@ class RV (config: RVConfig) extends Component {
             io.rvfi.ixl      := 1
             io.rvfi.mode     := 3
         }
-        
-
+    
         when(isValid){
             when(jump.pc_jump_valid){
                 io.rvfi.pc_wdata  := jump.pc_jump.resize(32)
@@ -819,8 +785,7 @@ class RV (config: RVConfig) extends Component {
 
     } else null
   }
-  
-  
+    // pipeline
   Builder(fetch, decode, execute, f2d, d2e)
   io.IO := 1
 }
@@ -906,7 +871,7 @@ object Assembler {
 object RVVerilog extends App {
   val config=SpinalConfig(device=Device.XILINX,targetDirectory = "hw/gen",mergeAsyncProcess = true)
  
-  config.generateVerilog(new RV(config = RVConfig(supportFormal = true,
+  config.generateVerilog(new RV(config = RVConfig(supportFormal = false,
                                                  supportMul = false,
                                                  supportDiv = false,
                                                  supportCsr = false))).printPruned()
