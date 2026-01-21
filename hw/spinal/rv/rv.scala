@@ -56,6 +56,14 @@ object CsrCmd extends SpinalEnum(binaryOneHot) {
     val CLEAR   = newElement()
 }
 
+object MulOp extends SpinalEnum(binaryOneHot) {
+    val NONE    = newElement()
+    val MUL     = newElement()
+    val MULH    = newElement()
+    val MULHSU  = newElement()
+    val MULHU   = newElement()
+}
+
 case class RVFI() extends Bundle {
 
     val valid       = Bool
@@ -319,10 +327,12 @@ class RV (config: RVConfig) extends Component {
     val csr_zimm    = UInt(5 bits)
     val csr_cmd     = CsrCmd()
     val csr_supported = False
+    val mul_op      = MulOp()
 
     csr_addr    := instr(31 downto 20).asUInt
     csr_zimm    := U(instr(19 downto 15))
     csr_cmd     := CsrCmd.NONE
+    mul_op      := MulOp.NONE
 
     val valid = Bool().simPublic()
     valid := up.isValid
@@ -413,27 +423,67 @@ class RV (config: RVConfig) extends Component {
         }
         is(Opcodes.ALU){
             iformat         := InstrFormat.R
-            switch(funct7 ## funct3.asBits){
-                is(B"0000000_000", B"0100000_000"){
-                    // ADD, SUB
-                    itype           := InstrType.ALU_ADD
-                    sub             := funct7(5)
+            when(funct7 === B"0000001"){
+                switch(funct3){
+                    is(B"000"){
+                        if(config.hasMul){
+                            itype   := InstrType.MULDIV
+                            mul_op  := MulOp.MUL
+                        } else {
+                            itype   := InstrType.Undef
+                        }
+                    }
+                    is(B"001"){
+                        if(config.hasMul){
+                            itype   := InstrType.MULDIV
+                            mul_op  := MulOp.MULH
+                        } else {
+                            itype   := InstrType.Undef
+                        }
+                    }
+                    is(B"010"){
+                        if(config.hasMul){
+                            itype   := InstrType.MULDIV
+                            mul_op  := MulOp.MULHSU
+                        } else {
+                            itype   := InstrType.Undef
+                        }
+                    }
+                    is(B"011"){
+                        if(config.hasMul){
+                            itype   := InstrType.MULDIV
+                            mul_op  := MulOp.MULHU
+                        } else {
+                            itype   := InstrType.Undef
+                        }
+                    }
+                    default {
+                        itype := InstrType.Undef
+                    }
                 }
-                is(B"0000000_100", B"0000000_110", B"0000000_111"){
-                    // ADD, SUB, XOR, OR, AND
-                    itype           := InstrType.ALU
+            } otherwise {
+                switch(funct7 ## funct3.asBits){
+                    is(B"0000000_000", B"0100000_000"){
+                        // ADD, SUB
+                        itype           := InstrType.ALU_ADD
+                        sub             := funct7(5)
+                    }
+                    is(B"0000000_100", B"0000000_110", B"0000000_111"){
+                        // ADD, SUB, XOR, OR, AND
+                        itype           := InstrType.ALU
+                    }
+                    is(B"0000000_001", B"0000000_101", B"0100000_101"){
+                        // SLL, SRL, SRA
+                        itype           := InstrType.SHIFT
+                    }
+                    is( B"0000000_010", B"0000000_011") {
+                        // SLT, SLTU
+                        itype           := InstrType.ALU
+                        unsigned        := funct3(0)
+                        sub             := True
+                    }
+              
                 }
-                is(B"0000000_001", B"0000000_101", B"0100000_101"){
-                    // SLL, SRL, SRA
-                    itype           := InstrType.SHIFT
-                }
-                is( B"0000000_010", B"0000000_011") {
-                    // SLT, SLTU
-                    itype           := InstrType.ALU
-                    unsigned        := funct3(0)
-                    sub             := True
-                }
-          
             }
         }
         is(Opcodes.SYS){
@@ -526,6 +576,7 @@ class RV (config: RVConfig) extends Component {
     val CSR_USE_IMM   = insert(csr_use_imm)
     val CSR_ZIMM      = insert(csr_zimm)
     val CSR_CMD       = insert(csr_cmd)
+    val MUL_OP        = insert(mul_op)
 
       val rs1_33 = unsigned ? B(U(RegFile.rs1_data).resize(33)) | B(S(RegFile.rs1_data).resize(33))
       val rs2_33 = unsigned ? B(U(RegFile.rs2_data).resize(33)) | B(S(RegFile.rs2_data).resize(33))
@@ -778,6 +829,52 @@ class RV (config: RVConfig) extends Component {
         }
         
     }
+        val mul_rd_wr = Bool()
+        val mul_rd_wdata = UInt(32 bits)
+        if(config.hasMul){
+            val mulArea = new Area {
+                val opSel      = MulOp()
+                opSel         := MUL_OP
+                val mulValid   = (itype === InstrType.MULDIV) && execute.isValid
+                val op1_s64    = op1.resize(64)
+                val op2_s64    = op2.resize(64)
+                val zero32     = B((31 downto 0) -> False)
+                val op1_u_s64  = S(zero32 ## op1)
+                val op2_u_s64  = S(zero32 ## op2)
+                val mul_ss     = (op1_s64 * op2_s64).asBits
+                val mul_su     = (op1_s64 * op2_u_s64).asBits
+                val mul_uu     = (U(op1).resize(64) * U(op2).resize(64)).asBits
+                val rd_wr      = Bool()
+                rd_wr          := False
+                val rd_wdata   = UInt(32 bits)
+                rd_wdata       := 0
+                val result     = UInt(32 bits)
+                result         := 0
+                switch(opSel){
+                    is(MulOp.MUL){
+                        result := U(mul_ss(31 downto 0))
+                    }
+                    is(MulOp.MULH){
+                        result := U(mul_ss(63 downto 32))
+                    }
+                    is(MulOp.MULHSU){
+                        result := U(mul_su(63 downto 32))
+                    }
+                    is(MulOp.MULHU){
+                        result := U(mul_uu(63 downto 32))
+                    }
+                }
+                when(mulValid && (opSel =/= MulOp.NONE)){
+                    rd_wr    := (rd_addr =/= 0)
+                    rd_wdata := result
+                }
+            }
+            mul_rd_wr    := mulArea.rd_wr
+            mul_rd_wdata := mulArea.rd_wdata
+        } else {
+            mul_rd_wr    := False
+            mul_rd_wdata := U(0, 32 bits)
+        }
     val csr_rd_wr = Bool()
     val csr_rd_wdata = UInt(32 bits)
     if(config.hasCsr){
@@ -834,12 +931,13 @@ class RV (config: RVConfig) extends Component {
         csr_rd_wr := False
         csr_rd_wdata := U(0, 32 bits)
     }
-    val rd_wr    = execute.isValid && (alu.rd_wr | jump.rd_wr | shift.rd_wr | lsu.rd_wr | csr_rd_wr) && (rd_addr =/= 0)
+    val rd_wr    = execute.isValid && (alu.rd_wr | jump.rd_wr | shift.rd_wr | lsu.rd_wr | mul_rd_wr | csr_rd_wr) && (rd_addr =/= 0)
     val rd_waddr = rd_addr
     val rd_wdata = B((alu.rd_wdata.range   -> alu.rd_wr))   & B(alu.rd_wdata)   |
                    B((jump.rd_wdata.range  -> jump.rd_wr))  & B(jump.rd_wdata)  |
                    B((shift.rd_wdata.range -> shift.rd_wr)) & B(shift.rd_wdata) |
                    B((lsu.rd_wdata.range   -> lsu.rd_wr))   & B(lsu.rd_wdata)   |
+                   B((mul_rd_wdata.range   -> mul_rd_wr))   & B(mul_rd_wdata)   |
                    B((csr_rd_wdata.range   -> csr_rd_wr))   & B(csr_rd_wdata)
 
     // register file
