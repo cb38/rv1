@@ -30,6 +30,7 @@ object InstrFormat extends SpinalEnum(binaryOneHot) {
     val U       = newElement()
     val J       = newElement()
     val Shamt   = newElement()
+    val CSR     = newElement()
 }
 
 object InstrType extends SpinalEnum(binaryOneHot) {
@@ -46,6 +47,13 @@ object InstrType extends SpinalEnum(binaryOneHot) {
     val E       = newElement()
     val CSR     = newElement()
     val MULDIV  = newElement()
+}
+
+object CsrCmd extends SpinalEnum(binaryOneHot) {
+    val NONE    = newElement()
+    val WRITE   = newElement()
+    val SET     = newElement()
+    val CLEAR   = newElement()
 }
 
 case class RVFI() extends Bundle {
@@ -211,6 +219,14 @@ class RV (config: RVConfig) extends Component {
     rs2_data := Mux(rs2_rd_addr === 0, B(0, 32 bits), Mux(rs2_rd_addr === rd_wr_addr, rd_wr_data, rs2))
     RegMem.write(rd_wr_addr, rd_wr_data, rd_wr)
   }
+
+    val CsrRegs = if(config.hasCsr) new Area {
+        val mstatus  = Reg(Bits(32 bits)) init(0)
+        val mtvec    = Reg(Bits(32 bits)) init(0)
+        val mscratch = Reg(Bits(32 bits)) init(0)
+        val mepc     = Reg(Bits(32 bits)) init(0)
+        val mcause   = Reg(Bits(32 bits)) init(0)
+    } else null
   
  
   //mem
@@ -297,6 +313,16 @@ class RV (config: RVConfig) extends Component {
     val unsigned    = False
     iformat         := InstrFormat.R
     itype           := InstrType.Undef
+
+    val csr_addr    = UInt(12 bits)
+    val csr_use_imm = False
+    val csr_zimm    = UInt(5 bits)
+    val csr_cmd     = CsrCmd()
+    val csr_supported = False
+
+    csr_addr    := instr(31 downto 20).asUInt
+    csr_zimm    := U(instr(19 downto 15))
+    csr_cmd     := CsrCmd.NONE
 
     val valid = Bool().simPublic()
     valid := up.isValid
@@ -410,6 +436,34 @@ class RV (config: RVConfig) extends Component {
           
             }
         }
+        is(Opcodes.SYS){
+            when(funct3 === B"000"){
+                itype       := InstrType.E
+                iformat     := InstrFormat.I
+            } otherwise {
+                if(config.hasCsr){
+                    itype       := InstrType.CSR
+                    iformat     := InstrFormat.CSR
+                    csr_use_imm := funct3(2)
+                    switch(funct3){
+                        is(B"001", B"101"){
+                            csr_cmd := CsrCmd.WRITE
+                        }
+                        is(B"010", B"110"){
+                            csr_cmd := CsrCmd.SET
+                        }
+                        is(B"011", B"111"){
+                            csr_cmd := CsrCmd.CLEAR
+                        }
+                        default {
+                            itype := InstrType.Undef
+                        }
+                    }
+                } else {
+                    itype := InstrType.Undef
+                }
+            }
+        }
         
        
       } // end opcode 
@@ -419,13 +473,35 @@ class RV (config: RVConfig) extends Component {
       val j_imm = S(B((10 downto 0) -> instr(31)) ## instr(31) ## instr(19 downto 12) ## instr(20) ## instr(30 downto 21) ## B"0")
       val u_imm = S(instr(31 downto 12) ## B((11 downto 0) -> false))
 
-      val trap = (itype === InstrType.Undef)
+      if(config.hasCsr){
+          switch(csr_addr){
+              is(U(0x300, 12 bits), U(0x305, 12 bits), U(0x340, 12 bits), U(0x341, 12 bits), U(0x342, 12 bits)){
+                  csr_supported := True
+              }
+          }
+      }
 
-      val rs1_valid =  ((iformat === InstrFormat.R) ||
-                        (iformat === InstrFormat.I) ||
-                        (iformat === InstrFormat.S) ||
-                        (iformat === InstrFormat.B) ||
-                        (iformat === InstrFormat.Shamt)) && !trap
+      val illegal_csr = Bool()
+      illegal_csr := False
+      if(config.hasCsr){
+          when(itype === InstrType.CSR && !csr_supported){
+              illegal_csr := True
+          }
+      } else {
+          when(itype === InstrType.CSR){
+              illegal_csr := True
+          }
+      }
+
+      val trap = Bool()
+      trap := (itype === InstrType.Undef) || illegal_csr
+
+    val rs1_valid =  ((iformat === InstrFormat.R) ||
+                (iformat === InstrFormat.I) ||
+                (iformat === InstrFormat.S) ||
+                (iformat === InstrFormat.B) ||
+                (iformat === InstrFormat.Shamt) ||
+                ((iformat === InstrFormat.CSR) && !csr_use_imm)) && !trap
 
       val rs2_valid =  ((iformat === InstrFormat.R) ||
                         (iformat === InstrFormat.S) ||
@@ -438,13 +514,18 @@ class RV (config: RVConfig) extends Component {
                         (iformat === InstrFormat.I) ||
                         (iformat === InstrFormat.U) ||
                         (iformat === InstrFormat.J) ||
-                        (iformat === InstrFormat.Shamt))
+                        (iformat === InstrFormat.Shamt) ||
+                        (iformat === InstrFormat.CSR))
       //val rd_valid_final = Bool()
       //rd_valid_final := rd_valid && !trap
 
       val rd_addr_final = Bits(5 bits)
       rd_addr_final :=  rd_valid ? rd_addr.asBits | B"00000"
-      val RD_ADDR_FINAL = insert(rd_addr_final)
+    val RD_ADDR_FINAL = insert(rd_addr_final)
+    val CSR_ADDR      = insert(csr_addr)
+    val CSR_USE_IMM   = insert(csr_use_imm)
+    val CSR_ZIMM      = insert(csr_zimm)
+    val CSR_CMD       = insert(csr_cmd)
 
       val rs1_33 = unsigned ? B(U(RegFile.rs1_data).resize(33)) | B(S(RegFile.rs1_data).resize(33))
       val rs2_33 = unsigned ? B(U(RegFile.rs2_data).resize(33)) | B(S(RegFile.rs2_data).resize(33))
@@ -697,12 +778,69 @@ class RV (config: RVConfig) extends Component {
         }
         
     }
-    val rd_wr    = execute.isValid && (alu.rd_wr | jump.rd_wr | shift.rd_wr | lsu.rd_wr ) && (rd_addr =/= 0)
+    val csr_rd_wr = Bool()
+    val csr_rd_wdata = UInt(32 bits)
+    if(config.hasCsr){
+        val csrArea = new Area {
+            val addr      = CSR_ADDR
+            val useImm    = CSR_USE_IMM
+            val zimm      = CSR_ZIMM
+            val cmd       = CSR_CMD
+            val operand   = op1.asBits
+        
+            
+            when(useImm){
+                operand := zimm.asBits
+            }
+            val readData = Bits(32 bits)
+            readData := 0
+            switch(addr.asBits){
+                is(U(0x300, 12 bits)){ readData := CsrRegs.mstatus }
+                is(U(0x305, 12 bits)){ readData := CsrRegs.mtvec }
+                is(U(0x340, 12 bits)){ readData := CsrRegs.mscratch }
+                is(U(0x341, 12 bits)){ readData := CsrRegs.mepc }
+                is(U(0x342, 12 bits)){ readData := CsrRegs.mcause }
+            }
+            val writeData = Bits(32 bits)
+            writeData := operand
+            switch(cmd.asBits){
+                is(CsrCmd.WRITE){ writeData := operand }
+                is(CsrCmd.SET){ writeData := readData | operand }
+                is(CsrCmd.CLEAR){ writeData := readData & ~operand }
+                default{ writeData := readData }
+            }
+            val csrOpValid = (itype === InstrType.CSR) && execute.isValid && !decoder.trap
+            val rd_wr       = Bool()
+            rd_wr := False
+            val rd_wdata    = UInt(32 bits)
+            rd_wdata := 0
+            when(csrOpValid){
+                rd_wr    := (rd_addr =/= 0)
+                rd_wdata := U(readData)
+            }
+            when(csrOpValid && (cmd =/= CsrCmd.NONE)){
+                switch(addr.asBits){
+                    is(U(0x300, 12 bits)){ CsrRegs.mstatus  := writeData }
+                    is(U(0x305, 12 bits)){ CsrRegs.mtvec    := writeData }
+                    is(U(0x340, 12 bits)){ CsrRegs.mscratch := writeData }
+                    is(U(0x341, 12 bits)){ CsrRegs.mepc     := writeData }
+                    is(U(0x342, 12 bits)){ CsrRegs.mcause   := writeData }
+                }
+            }
+        }
+        csr_rd_wr := csrArea.rd_wr
+        csr_rd_wdata := csrArea.rd_wdata
+    } else {
+        csr_rd_wr := False
+        csr_rd_wdata := U(0, 32 bits)
+    }
+    val rd_wr    = execute.isValid && (alu.rd_wr | jump.rd_wr | shift.rd_wr | lsu.rd_wr | csr_rd_wr) && (rd_addr =/= 0)
     val rd_waddr = rd_addr
     val rd_wdata = B((alu.rd_wdata.range   -> alu.rd_wr))   & B(alu.rd_wdata)   |
                    B((jump.rd_wdata.range  -> jump.rd_wr))  & B(jump.rd_wdata)  |
                    B((shift.rd_wdata.range -> shift.rd_wr)) & B(shift.rd_wdata) |
-                   B((lsu.rd_wdata.range   -> lsu.rd_wr))   & B(lsu.rd_wdata)
+                   B((lsu.rd_wdata.range   -> lsu.rd_wr))   & B(lsu.rd_wdata)   |
+                   B((csr_rd_wdata.range   -> csr_rd_wr))   & B(csr_rd_wdata)
 
     // register file
     RegFile.rd_wr       := rd_wr
