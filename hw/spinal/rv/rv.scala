@@ -287,14 +287,16 @@ class RV (config: RVConfig) extends Component {
        io.data_req.valid := True
     }
      // instruction memory 
-    val rdAddrI = UInt(config.dataAddrSize bits)
-    rdAddrI := 0
+     io.instr_req.addr := 0
+     io.instr_req.valid := False
 
-    io.instr_req.addr  := rdAddrI.resized 
-    io.instr_req.valid := isFetch
     rdInst  := io.instr_rsp.data
-    when (!init) (isFetch := False)
+    when (!init) (isFetch := False) // fix initial read
     
+    def ReadIntr(addr: UInt) = {
+         io.instr_req.addr  := addr.resized 
+         io.instr_req.valid := isFetch
+    }
    }  
   
   val fetcher = new fetch.Area {
@@ -309,7 +311,7 @@ class RV (config: RVConfig) extends Component {
     up.valid := RegNext(memory.isFetch).init(False)
     // pc
      when(up.isFiring ) (Iptr := Iptr + 4)
-     when (init) (memory.rdAddrI := (Iptr).resized)
+     when (init) (memory.ReadIntr((Iptr).resized))
      PC := (Iptr-4).asBits 
 
     // push instruction to fifo   
@@ -1291,7 +1293,7 @@ object Assembler {
 object RVVerilog extends App {
   val config=SpinalConfig(device=Device.XILINX,targetDirectory = "hw/gen",mergeAsyncProcess = true)
  
-  config.generateVerilog(new RV(config = RVConfig(supportFormal = false,
+  config.generateVerilog(new RV(config = RVConfig(supportFormal = true,
                                                  supportMul = false,
                                                  supportDiv = false,
                                                  supportCsr = false))).printPruned()

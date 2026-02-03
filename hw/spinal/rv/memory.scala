@@ -1,6 +1,7 @@
 package multiport_memory
 import spinal.core._
 import spinal.lib._
+import spinal.lib.bus.amba4.axilite._
 import spinal.sim._
 import spinal.core.sim._
 
@@ -119,5 +120,100 @@ class MultiPortMem_1w_2rs(config: MemConfig, readUnderWrite: ReadUnderWritePolic
 
 
 
+class AXI4Lite_Mem(axiLiteCfg: AxiLite4Config, config: MemConfig) extends Component
+{
 
+
+    private val bytesPerWord = axiLiteCfg.dataWidth / 8
+    private val addrLsb      = log2Up(bytesPerWord)
+   
+    
+    private def toWordAddress(addr: UInt): UInt = {
+        if(addrLsb == 0) addr.resize(config.addrWidth)
+        else (addr >> addrLsb).resized
+    }
+
+    val io = new Bundle {
+        val axi = slave(AxiLite4(axiLiteCfg))
+    }
+
+    val mem = new Mem_1w_1rs(config, readUnderWrite = dontCare)
+
+    // -----------------------------
+    // Write channel (single outstanding)
+    // -----------------------------
+    val awPending = RegInit(False)
+    val wPending  = RegInit(False)
+    val bValid    = RegInit(False)
+
+    val wrAddrReg = Reg(UInt(config.addrWidth bits)) init(0)
+    val wrDataReg = Reg(Bits(config.dataWidth bits)) init(0)
+    val wrMaskReg = Reg(Bits(bytesPerWord bits)) init(0)
+
+    io.axi.aw.ready := !awPending
+    when(io.axi.aw.fire){
+        wrAddrReg := toWordAddress(io.axi.aw.addr)
+        awPending := True
+    }
+
+    io.axi.w.ready := !wPending
+    when(io.axi.w.fire){
+        wrDataReg := io.axi.w.data
+        wrMaskReg := io.axi.w.strb
+        wPending  := True
+    }
+
+    val writeFire = awPending && wPending && !bValid
+    when(writeFire){
+        awPending := False
+        wPending  := False
+        bValid    := True
+    }
+
+    io.axi.b.valid := bValid
+    io.axi.b.resp  := B"00" // OKAY
+    when(io.axi.b.fire){
+        bValid := False
+    }
+
+    mem.io.wr_ena  := writeFire
+    mem.io.wr_addr := wrAddrReg
+    mem.io.wr_data := wrDataReg
+    mem.io.wr_mask := wrMaskReg
+
+    // -----------------------------
+    // Read channel (single outstanding)
+    // -----------------------------
+    val rdBusy     = RegInit(False)
+    val rdAddrReg  = Reg(UInt(config.addrWidth bits)) init(0)
+    val rdDataReg  = Reg(Bits(config.dataWidth bits)) init(0)
+    val rdValidReg = RegInit(False)
+
+    io.axi.ar.ready := !rdBusy
+    val rdLaunch    = io.axi.ar.fire
+    val rdAddrNext  = toWordAddress(io.axi.ar.addr)
+
+    when(rdLaunch){
+        rdBusy    := True
+        rdAddrReg := rdAddrNext
+    }
+    when(io.axi.r.fire){
+        rdBusy     := False
+        rdValidReg := False
+    }
+
+    val rdAddrForMem = rdLaunch ? rdAddrNext | rdAddrReg
+    mem.io.rd_ena  := rdLaunch
+    mem.io.rd_addr := rdAddrForMem
+
+    val rdLatency = RegNext(rdLaunch, init = False)
+    when(rdLatency){
+        rdDataReg  := mem.io.rd_data
+        rdValidReg := True
+    }
+
+    io.axi.r.valid := rdValidReg
+    io.axi.r.data  := rdDataReg
+    io.axi.r.resp  := B"00" // OKAY
+}
 
