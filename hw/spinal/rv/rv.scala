@@ -1,6 +1,7 @@
 package rv
 import spinal.core._
 import spinal.lib._ 
+import spinal.lib.bus.amba4.axilite._
 import spinal.lib.fsm._
 import spinal.sim._
 import spinal.core.sim._
@@ -199,13 +200,21 @@ class RV (config: RVConfig) extends Component {
     val rvfi = if (config.hasFormal) out(Reg(RVFI()) init).setName("rvfi") else null
     //val exit = out(Reg(Bool)).init(False)
 
-    val instr_req = InstrReqIntfc(config).setName("instr_req")
-    val instr_rsp = InstrRspIntfc(config).setName("instr_rsp")
+    val instr_axi = master(AxiLite4ReadOnly(
+        AxiLite4Config(
+            addressWidth = config.pcSize,
+            dataWidth    = 32
+        )
+    )).setName("instr_axi")
 
-    val data_req  = DataReqIntfc(config).setName("data_req")
-    val data_rsp  = DataRspIntfc(config).setName("data_rsp")
+    val data_axi  = master(AxiLite4(
+        AxiLite4Config(
+            addressWidth = config.dataAddrSize,
+            dataWidth    = 32
+        )
+    )).setName("data_axi")
     val irq       = in(Bool).setName("irq")
- }
+  }
 
 
   // general
@@ -255,74 +264,125 @@ class RV (config: RVConfig) extends Component {
     }
   
  
-  //mem
-  val memory = new Area {
-   val isFetch = True
-    val readDone = Bool
-    val rdData = Bits(32 bits)
-    val rdInst = Bits(32 bits)
-    
-    // data memory
-    io.data_req.wren := False
-    io.data_req.rden := False
-    io.data_req.valid := False
-    io.data_req.rdaddr := 0
-    io.data_req.wraddr := 0
-    io.data_req.size := B"00"
-    io.data_req.data := 0
-    rdData := io.data_rsp.data
-    readDone := io.data_rsp.valid
-    when ( io.data_req.valid && !io.data_req.ready)  (execute.haltIt())
+    //mem
+    val memory = new Area {
+        val readDone = Bool
+        val rdData   = Bits(32 bits)
+        val rdInst   = Bits(32 bits)
+        val rdPc     = Bits(32 bits)
 
-    def WriteData(addr: UInt, data: Bits, size : Bits) = {
-      io.data_req.wraddr := addr.resized
-      io.data_req.data := data
-      io.data_req.wren  := True
-      io.data_req.size  := size
-      io.data_req.valid := True
-    }
-    def ReadData(addr: UInt) = {
-       io.data_req.rdaddr  := addr.resized 
-       io.data_req.rden  := True
-       io.data_req.valid := True
-    }
-     // instruction memory 
-     io.instr_req.addr := 0
-     io.instr_req.valid := False
+        val loadPending = RegInit(False)
 
-    rdInst  := io.instr_rsp.data
-    when (!init) (isFetch := False) // fix initial read
-    
-    def ReadIntr(addr: UInt) = {
-         io.instr_req.addr  := addr.resized 
-         io.instr_req.valid := isFetch
+        rdData   := io.data_axi.r.data
+        readDone := io.data_axi.r.fire
+        when(io.data_axi.r.fire) { loadPending := False }
+        when(loadPending && !io.data_axi.r.fire) { execute.haltIt() }
+        when(io.data_axi.ar.fire) { loadPending := True }
+        // default values
+        io.data_axi.aw.valid := False
+        io.data_axi.aw.addr  := 0
+        io.data_axi.aw.prot  := B"000"
+        io.data_axi.w.valid  := False
+        io.data_axi.w.data   := 0
+        io.data_axi.w.strb   := 0
+        io.data_axi.ar.valid := False
+        io.data_axi.ar.addr  := 0
+        io.data_axi.ar.prot  := B"000"
+        io.data_axi.b.ready  := True
+        io.data_axi.r.ready  := True
+        
+
+        def WriteData(addr: UInt, data: Bits, size: Bits) = {
+            io.data_axi.aw.addr := addr.resized
+            io.data_axi.aw.valid  := True
+            io.data_axi.aw.prot  := B"000"
+            io.data_axi.w.strb := size.mux(
+                B"00"   -> B"0001",
+                B"01"   -> B"0011",
+                default -> B"1111") |<< addr(1 downto 0) 
+            io.data_axi.w.data    := data
+            io.data_axi.w.valid   := True
+        }   
+        def ReadData(addr: UInt) = {
+            io.data_axi.ar.addr := addr.resized
+            io.data_axi.ar.valid  := True
+            io.data_axi.ar.prot  := B"000"
+            
+        }
+        // instruction request from fetcher
+        val instrReqAddr  = UInt(config.pcSize bits)
+        val instrReqValid = Bool()
+   
+        val instrPending    = RegInit(False)
+        val instrAddrReg    = Reg(UInt(config.pcSize bits)) init(0)
+        val instrRspValidReg = RegInit(False)
+        val instrRspDataReg  = Reg(Bits(32 bits)) init(0)
+        val instrRspPcReg    = Reg(UInt(32 bits)) init(0)
+        val instrReq_ready     = Bool()
+
+        io.instr_axi.ar.valid := instrReqValid && !instrPending && !flush
+        io.instr_axi.ar.addr  := instrReqAddr
+        io.instr_axi.ar.prot  := B"000"
+        instrReq_ready        := io.instr_axi.ar.ready && !instrPending
+
+        when(io.instr_axi.ar.fire) {
+            instrPending := True
+            instrAddrReg := instrReqAddr
+        }
+
+        io.instr_axi.r.ready := instrPending
+        when(io.instr_axi.r.fire) {
+            instrPending     := False
+            instrRspValidReg := True
+            instrRspDataReg  := io.instr_axi.r.data
+            instrRspPcReg    := instrAddrReg
+        } elsewhen(instrRspValidReg) {
+            instrRspValidReg := False
+        }
+
+        when(flush) {
+            instrPending     := False
+            instrRspValidReg := False
+        }
+
+
+        rdInst := instrRspDataReg
+        rdPc   := instrRspPcReg.asBits
+
+       
     }
-   }  
   
-  val fetcher = new fetch.Area {
-    val fifo= new StreamFifo(Bits(32 bits),  2,
-        withBypass = true,
-        withAsyncRead = true,
-        useVec = true
-      ) 
-    val delayFiring = RegNext (up.isFiring)
-    val delayFiring2 = RegNext (delayFiring)
-    
-    up.valid := RegNext(memory.isFetch).init(False)
-    // pc
-     when(up.isFiring ) (Iptr := Iptr + 4)
-     when (init) (memory.ReadIntr((Iptr).resized))
-     PC := (Iptr-4).asBits 
+    val fetcher = new fetch.Area {
+        case class FetchPacket() extends Bundle {
+            val inst = Bits(32 bits)
+            val pc   = Bits(32 bits)
+        }
 
-    // push instruction to fifo   
-    fifo.io.push.valid := delayFiring2 
-    fifo.io.push.payload := memory.rdInst 
-    // pop instruction from fifo
-    fifo.io.pop.ready := down.ready
-    fifo.io.flush := flush 
-    INSTRUCTION := fifo.io.pop.payload // push 4 instructions + offset
-    decode.throwWhen(!fifo.io.pop.valid)
-   }
+        val fetchFifo = new StreamFifo(FetchPacket(), 2,
+            withBypass = true,
+            withAsyncRead = true,
+            useVec = true
+        )
+
+        val canRequest = fetchFifo.io.push.ready
+        memory.instrReqValid := canRequest
+        memory.instrReqAddr  := Iptr
+        when(memory.instrReqValid && memory.instrReq_ready) {
+            Iptr := Iptr + 4
+        }
+
+        fetchFifo.io.push.valid          := memory.instrRspValidReg
+        fetchFifo.io.push.payload.inst   := memory.rdInst
+        fetchFifo.io.push.payload.pc     := memory.rdPc
+
+        fetchFifo.io.pop.ready := down.ready
+        fetchFifo.io.flush     := flush
+
+        up.valid    := fetchFifo.io.pop.valid
+        INSTRUCTION := fetchFifo.io.pop.payload.inst
+        PC          := fetchFifo.io.pop.payload.pc
+       
+    }
 
   val decoder = new decode.Area {
     
@@ -847,6 +907,7 @@ class RV (config: RVConfig) extends Component {
         }
         
     }
+    
     val irq_taken = Bool()
     irq_taken := False
     val irq_target = UInt(32 bits)
@@ -1246,7 +1307,7 @@ object Assembler {
       s.substring(1).toInt
     }
     for (line <- source.getLines()) {
-      if (!pass2) println(line)
+      
       val tokens = line.trim.split(" ")
       val Pattern = "(.*:)".r
       val instruction = tokens(0) match {
@@ -1266,7 +1327,12 @@ object Assembler {
         case t: String => throw new Exception("Assembler error: unknown instruction")
         case _ => throw new Exception("Assembler error")
       }
-      //println(instruction)
+      // print in hex
+      if (!pass2) println(line, (instruction match {
+        case (a: Int) => f"0x$a%08x"
+        case _ => "----"
+      }))
+     
 
       instruction match {
         
@@ -1316,46 +1382,53 @@ class TopRV(config: RVConfig) extends Component {
 
     val core = new Area {
 
-        val rv = new RV(config)        
+        val rv = new RV(config)
         val cfg = MemConfig(memorySize = 1024, dataWidth = 32)
-        val cpu_ram = new MultiPortMem_1w_2rs( cfg , writeFirst)
-       
-        // memory connections
-        /// instruction memory
-        rv.io.instr_req.ready   := True
-        
-        rv.io.instr_rsp.valid   := RegNext(rv.io.instr_req.valid) init(False)
-        cpu_ram.io.rd1.addr     := (rv.io.instr_req.addr |>>2).resized
-        cpu_ram.io.rd1.ena      := rv.io.instr_req.valid 
-        rv.io.instr_rsp.data    := cpu_ram.io.rd1.data
-        rv.io.irq               := io.irq
 
-        // data memory
-        rv.io.data_req.ready := True
-        rv.io.data_rsp.valid := RegNext(rv.io.data_req.valid) init(False)
+        val instrMem = new AXI4LiteReadOnly_Mem(
+            AxiLite4Config(
+                addressWidth = config.pcSize,
+                dataWidth    = 32
+            ),
+            cfg
+        )
 
+        val dataMem = new AXI4Lite_Mem(
+            AxiLite4Config(
+                addressWidth = config.dataAddrSize,
+                dataWidth    = 32
+            ),
+            cfg
+        )
 
+        rv.io.instr_axi <> instrMem.io.axi
+        rv.io.data_axi  <> dataMem.io.axi
+        rv.io.irq       := io.irq
 
+        val awSeen = RegInit(False)
+        val wSeen  = RegInit(False)
+        val awAddr = Reg(UInt(config.dataAddrSize bits)) init(0)
+        val wData  = Reg(Bits(32 bits)) init(0)
 
-        val wmask = rv.io.data_req.size.mux(
-                        B"00"   -> B"0001",
-                        B"01"   -> B"0011",
-                        default -> B"1111") |<< rv.io.data_req.wraddr(1 downto 0)
+        when(rv.io.data_axi.aw.fire) {
+            awSeen := True
+            awAddr := rv.io.data_axi.aw.addr
+        }
+        when(rv.io.data_axi.w.fire) {
+            wSeen := True
+            wData := rv.io.data_axi.w.data
+        }
 
-        cpu_ram.io.wr0.mask    := wmask
+        val writeCommit = awSeen && wSeen
+        when(writeCommit) {
+            awSeen := False
+            wSeen  := False
+        }
 
-        cpu_ram.io.wr0.addr      := (rv.io.data_req.wraddr >> 2).resized
-        cpu_ram.io.wr0.ena       := rv.io.data_req.valid && rv.io.data_req.wren 
-        cpu_ram.io.wr0.data      := rv.io.data_req.data
-        cpu_ram.io.rd0.addr      := (rv.io.data_req.rdaddr >> 2).resized
-        cpu_ram.io.rd0.ena       := rv.io.data_req.valid && rv.io.data_req.rden
-        rv.io.data_rsp.data      := cpu_ram.io.rd0.data.resized
-
-        val update_leds = rv.io.data_req.valid && rv.io.data_req.wren && rv.io.data_req.wraddr(9)
-
-        io.led1 := RegNextWhen(rv.io.data_req.data(0), update_leds) init(False)
-        io.led2 := RegNextWhen(rv.io.data_req.data(1), update_leds) init(False)
-        io.led3 := RegNextWhen(rv.io.data_req.data(2), update_leds) init(False)
+        val update_leds = writeCommit && awAddr(9)
+        io.led1 := RegNextWhen(wData(0), update_leds) init(False)
+        io.led2 := RegNextWhen(wData(1), update_leds) init(False)
+        io.led3 := RegNextWhen(wData(2), update_leds) init(False)
       }
 
      
@@ -1384,18 +1457,17 @@ object RVSim extends App {
                                                  supportMul = false,
                                                  supportDiv = false,
                                                  supportCsr = false) )).doSim(seed = 2){ dut =>
-  val mem = dut.core.cpu_ram
+  val instrMem = dut.core.instrMem.mem.u_mem
+  val dataMem  = dut.core.dataMem.mem.u_mem
    for (i <- 0 until program.length) {
-            mem.u_mem_bank0.u_mem.setBigInt(i, program(i))
-            mem.u_mem_bank1.u_mem.setBigInt(i, program(i))
-            
+            instrMem.setBigInt(i, program(i))
+            dataMem.setBigInt(i, program(i))
         }
   // fill the rest of memory with 0
   for (i <- program.length until 1024) {
-            mem.u_mem_bank0.u_mem.setBigInt(i, 0)
-            mem.u_mem_bank1.u_mem.setBigInt(i, 0)
-            
-        }      
+            instrMem.setBigInt(i, 0)
+            dataMem.setBigInt(i, 0)
+        }
   dut.clockDomain.forkStimulus(10)
   dut.io.irq #= false
   var run = 50
@@ -1404,12 +1476,16 @@ object RVSim extends App {
     dut.core.rv.RegFile.RegMem.setBigInt(j,0)
     println()
   }
-
-   while(run>0 && dut.core.rv.decoder.instr.toBigInt != 0 ) {
+  // run simulation and stop when instruction is 0
+   while(run>0 && (dut.core.rv.decoder.instr.toBigInt != 0 ||  dut.core.rv.decoder.pc.toBigInt < 4)) {
         dut.clockDomain.waitSampling(1)
         run -= 1
         if (dut.core.rv.decoder.valid.toBoolean)  {
              printf("PC: %08X, INST: %08X",dut.core.rv.decoder.pc.toBigInt, dut.core.rv.decoder.instr.toBigInt)
+             // print status of reg 0-7 
+                for (j <- 1 until 8 ) {
+                    printf(" x%02d: %08X  ", j,dut.core.rv.RegFile.RegMem.getBigInt(j))
+                }
              println()
         }
     }
@@ -1422,7 +1498,7 @@ object RVSim extends App {
   // read value from memory
     println("value of memory at the  end of simu")
     for (j <- 14 until 32 by 2) {
-        printf("mem[%02d]:  %08X   mem[%02d]:  %08X ", j,mem.u_mem_bank0.u_mem.getBigInt(j),j+1,mem.u_mem_bank0.u_mem.getBigInt(j+1))
+        printf("mem[%02d]:  %08X   mem[%02d]:  %08X ", j,dataMem.getBigInt(j),j+1,dataMem.getBigInt(j+1))
         println()  
     } 
  }

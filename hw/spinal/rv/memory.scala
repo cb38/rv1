@@ -217,3 +217,38 @@ class AXI4Lite_Mem(axiLiteCfg: AxiLite4Config, config: MemConfig) extends Compon
     io.axi.r.resp  := B"00" // OKAY
 }
 
+class AXI4LiteReadOnly_Mem(axiLiteCfg: AxiLite4Config, config: MemConfig) extends Component
+{
+
+
+    private val bytesPerWord = axiLiteCfg.dataWidth / 8
+    private val addrLsb      = log2Up(bytesPerWord)
+   
+    
+    private def toWordAddress(addr: UInt): UInt = {
+        if(addrLsb == 0) addr.resize(config.addrWidth)
+        else (addr >> addrLsb).resized
+    }
+
+    val io = new Bundle {
+        val axi = slave(AxiLite4ReadOnly(axiLiteCfg))
+    }
+
+    val mem = new Mem_1w_1rs(config, readUnderWrite = dontCare)
+
+   
+    // default values for write port
+    mem.io.wr_ena  := False
+    mem.io.wr_addr := 0
+    mem.io.wr_data := 0
+    mem.io.wr_mask := 0
+
+    mem.io.rd_ena  := io.axi.ar.valid
+    mem.io.rd_addr := toWordAddress(io.axi.ar.addr)
+    
+
+    io.axi.ar.ready := True
+    io.axi.r.valid := RegNext(io.axi.ar.valid)
+    io.axi.r.data  := mem.io.rd_data
+    io.axi.r.resp  := B"00" // OKAY
+}
