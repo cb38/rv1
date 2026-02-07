@@ -276,7 +276,7 @@ class RV (config: RVConfig) extends Component {
         rdData   := io.data_axi.r.data
         readDone := io.data_axi.r.fire
         when(io.data_axi.r.fire) { loadPending := False }
-        when(loadPending && !io.data_axi.r.fire) { execute.haltIt() }
+        when(loadPending && !io.data_axi.r.fire) { execute.haltIt() ; decode.haltIt(); fetch.haltIt() }
         when(io.data_axi.ar.fire) { loadPending := True }
         // default values
         io.data_axi.aw.valid := False
@@ -644,7 +644,7 @@ class RV (config: RVConfig) extends Component {
                         (iformat === InstrFormat.U) ||
                         (iformat === InstrFormat.J) ||
                         (iformat === InstrFormat.Shamt) ||
-                        (iformat === InstrFormat.CSR))
+                        (iformat === InstrFormat.CSR))&& !trap
       //val rd_valid_final = Bool()
       //rd_valid_final := rd_valid && !trap
 
@@ -878,6 +878,9 @@ class RV (config: RVConfig) extends Component {
         rd_wdata     := 0
         val mem_wdata = Bits(32 bits)
         mem_wdata := 0
+
+        val memRdData = Bits(32 bits)  
+        memRdData := 0
           
         when (itype === InstrType.S) {
            
@@ -894,7 +897,8 @@ class RV (config: RVConfig) extends Component {
             rd_wr    := True  
             val ld_data_signed = !funct3(2)
             val rsp_data_shift_adj = Bits(32 bits)
-            rsp_data_shift_adj := memory.rdData >> (lsu_addr(1 downto 0) << 3)
+            memRdData := memory.rdData
+            rsp_data_shift_adj := memRdData >> (lsu_addr(1 downto 0) << 3)
             val data =  size.mux[Bits](
                             B"00"   -> (ld_data_signed ? B(S(rsp_data_shift_adj( 7 downto 0)).resize(32)) | 
                                                          B(U(rsp_data_shift_adj( 7 downto 0)).resize(32)) ),
@@ -1147,12 +1151,20 @@ class RV (config: RVConfig) extends Component {
     
     // FORMAL
     val formal = if (config.hasFormal) new Area {
+        
+        val execPc = PC.asUInt.resize(32)
+        val haltRequest = memory.loadPending && !memory.readDone
+        val rvfiCommit = (decode.isValid || irq_taken) && !haltRequest
 
-        io.rvfi.valid := RegNext(isValid || irq_taken)
+        when(rvfiCommit){
+            rvfiOrder := rvfiOrder + 1
+        }
+
+        io.rvfi.valid := rvfiCommit
 
         when(isValid){
             io.rvfi.order     := rvfi.order
-            io.rvfi.pc_rdata  := rvfi.pc_rdata
+            io.rvfi.pc_rdata  := execPc
             io.rvfi.insn      := rvfi.insn
             io.rvfi.trap      := rvfi.trap
             io.rvfi.halt      := rvfi.halt
@@ -1196,11 +1208,11 @@ class RV (config: RVConfig) extends Component {
         }
     
         when(isValid){
-            when(jump.pc_jump_valid){
+            when(jump.take_jump){
                 io.rvfi.pc_wdata  := jump.pc_jump.resize(32)
             }
             .otherwise{
-                io.rvfi.pc_wdata  := rvfi.pc_rdata + 4
+                io.rvfi.pc_wdata  := execPc + 4
             }
         }
 
@@ -1216,6 +1228,9 @@ class RV (config: RVConfig) extends Component {
                     io.rvfi.mem_addr  := lsu.lsu_addr(31 downto 2) @@ U"00"
                     io.rvfi.mem_rmask := ((size === B"00") ? B"0001" |  ((size === B"01") ? B"0011" |  B"1111")) |<< lsu.lsu_addr(1 downto 0)
 
+                    when(memory.readDone){
+                        io.rvfi.mem_rdata := lsu.memRdData
+                    }
                     io.rvfi.trap      := (size === B"01" && lsu.lsu_addr(0)) |
                                       (size === B"10" && !(lsu.lsu_addr(1 downto 0) === 0))
                 }
@@ -1314,6 +1329,7 @@ object Assembler {
         case "#" => // comment
         case Pattern(l) => if (!pass2) symbols += (l.substring(0, l.length - 1) -> pc)
         case "add"    =>   regNumber(tokens(3)) << 20 | regNumber(tokens(2)) << 15 | regNumber(tokens(1)) << 7 | 0x33
+        case "sub"    =>   0x20 << 25 | regNumber(tokens(3)) << 20 | regNumber(tokens(2)) << 15 | regNumber(tokens(1)) << 7 | 0x33     
         case "addi"   =>   toInt(tokens(3)) << 20 | regNumber(tokens(2)) << 15 | regNumber(tokens(1)) << 7 | 0x13
         case "lui"    =>   toInt(tokens(2)) << 12 | regNumber(tokens(1)) << 7  | 0x37
         case "jal"    =>   toInt(tokens(2)) << 20 | regNumber(tokens(1)) << 7  | 0x6f
@@ -1500,6 +1516,13 @@ object RVSim extends App {
     for (j <- 14 until 32 by 2) {
         printf("mem[%02d]:  %08X   mem[%02d]:  %08X ", j,dataMem.getBigInt(j),j+1,dataMem.getBigInt(j+1))
         println()  
-    } 
+    }
+        // check r1 is 0 then test passed
+    if(dut.core.rv.RegFile.RegMem.getBigInt(1) == 0){
+        println("Test passed!")
+    } else {
+        println("Test failed!") 
+    }   
+    
  }
 }
