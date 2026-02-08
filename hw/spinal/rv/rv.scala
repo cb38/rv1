@@ -265,19 +265,16 @@ class RV (config: RVConfig) extends Component {
   
  
     //mem
-    val memory = new Area {
+    val dataMemory = new Area {
         val readDone = Bool
         val rdData   = Bits(32 bits)
-        val rdInst   = Bits(32 bits)
-        val rdPc     = Bits(32 bits)
-
         val loadPending = RegInit(False) addAttribute("keep")
 
         rdData   := io.data_axi.r.data
         readDone := io.data_axi.r.fire
         when(io.data_axi.r.fire) { loadPending := False }
-       // when(loadPending /*&& !io.data_axi.r.fire*/) { execute.haltIt() }
         when(io.data_axi.ar.valid) { loadPending := True }
+
         // default values
         io.data_axi.aw.valid := False
         io.data_axi.aw.addr  := 0
@@ -290,7 +287,6 @@ class RV (config: RVConfig) extends Component {
         io.data_axi.ar.prot  := B"000"
         io.data_axi.b.ready  := True
         io.data_axi.r.ready  := True
-        
 
         def WriteData(addr: UInt, data: Bits, size: Bits) = {
             io.data_axi.aw.addr := addr.resized
@@ -299,20 +295,25 @@ class RV (config: RVConfig) extends Component {
             io.data_axi.w.strb := size.mux(
                 B"00"   -> B"0001",
                 B"01"   -> B"0011",
-                default -> B"1111") |<< addr(1 downto 0) 
+                default -> B"1111") |<< addr(1 downto 0)
             io.data_axi.w.data    := data
             io.data_axi.w.valid   := True
-        }   
+        }
         def ReadData(addr: UInt) = {
             io.data_axi.ar.addr := addr.resized
             io.data_axi.ar.valid  := True
             io.data_axi.ar.prot  := B"000"
-            
         }
+    }
+
+    val instrMemory = new Area {
+        val rdInst   = Bits(32 bits)
+        val rdPc     = Bits(32 bits)
+
         // instruction request from fetcher
         val instrReqAddr  = UInt(config.pcSize bits)
         val instrReqValid = Bool()
-   
+
         val instrPending    = RegInit(False)
         val instrAddrReg    = Reg(UInt(config.pcSize bits)) init(0)
         val instrRspValidReg = RegInit(False)
@@ -345,11 +346,8 @@ class RV (config: RVConfig) extends Component {
             instrRspValidReg := False
         }
 
-
         rdInst := instrRspDataReg
         rdPc   := instrRspPcReg.asBits
-
-       
     }
   
     val fetcher = new fetch.Area {
@@ -365,15 +363,15 @@ class RV (config: RVConfig) extends Component {
         )
 
         val canRequest = fetchFifo.io.push.ready
-        memory.instrReqValid := canRequest
-        memory.instrReqAddr  := Iptr
-        when(memory.instrReqValid && memory.instrReq_ready) {
+        instrMemory.instrReqValid := canRequest
+        instrMemory.instrReqAddr  := Iptr
+        when(instrMemory.instrReqValid && instrMemory.instrReq_ready) {
             Iptr := Iptr + 4
         }
 
-        fetchFifo.io.push.valid          := memory.instrRspValidReg
-        fetchFifo.io.push.payload.inst   := memory.rdInst
-        fetchFifo.io.push.payload.pc     := memory.rdPc
+        fetchFifo.io.push.valid          := instrMemory.instrRspValidReg
+        fetchFifo.io.push.payload.inst   := instrMemory.rdInst
+        fetchFifo.io.push.payload.pc     := instrMemory.rdPc
 
         fetchFifo.io.pop.ready := down.ready
         fetchFifo.io.flush     := flush
@@ -890,15 +888,15 @@ class RV (config: RVConfig) extends Component {
             B"01" -> rs2(15 downto 0) ## rs2(15 downto 0),
             default -> rs2
           )                       
-          when (isValid) { memory.WriteData(lsu_addr, mem_wdata, size) }
+          when (isValid) { dataMemory.WriteData(lsu_addr, mem_wdata, size) }
         }
         when (itype === InstrType.L) {
-            when (isValid) {memory.ReadData(lsu_addr)}
-           when (memory.readDone === True) {
+            when (isValid) {dataMemory.ReadData(lsu_addr)}
+           when (dataMemory.readDone === True) {
             rd_wr    := True  
             val ld_data_signed = !funct3(2)
             val rsp_data_shift_adj = Bits(32 bits)
-            memRdData := memory.rdData
+            memRdData := dataMemory.rdData
             rsp_data_shift_adj := memRdData >> (lsu_addr(1 downto 0) << 3)
             val data =  size.mux[Bits](
                             B"00"   -> (ld_data_signed ? B(S(rsp_data_shift_adj( 7 downto 0)).resize(32)) | 
@@ -1159,7 +1157,7 @@ class RV (config: RVConfig) extends Component {
         
         val execPc = PC.asUInt.resize(32)
         
-        val rvfiRetire = execute.isValid && !flush && !haltRequest && (!memory.loadPending || memory.readDone)
+        val rvfiRetire = execute.isValid && !flush && !haltRequest && (!dataMemory.loadPending || dataMemory.readDone)
 
         when(rvfiRetire){
             rvfiOrder := rvfiOrder + 1
@@ -1232,7 +1230,7 @@ class RV (config: RVConfig) extends Component {
                     io.rvfi.mem_addr  := lsu.lsu_addr(31 downto 2) @@ U"00"
                     io.rvfi.mem_rmask := ((size === B"00") ? B"0001" |  ((size === B"01") ? B"0011" |  B"1111")) |<< lsu.lsu_addr(1 downto 0)
 
-                    when(memory.readDone){
+                    when(dataMemory.readDone){
                         io.rvfi.mem_rdata := lsu.memRdData
                     }
                     io.rvfi.trap      := (size === B"01" && lsu.lsu_addr(0)) |
