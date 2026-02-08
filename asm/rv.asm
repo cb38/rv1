@@ -5,9 +5,9 @@ add r4 r1 r2
 addi r2 r0 96
 sw r4 4 r2
 sw r4 0 r2
-lw r5 0 r2
+lw r5 4 r2
 lw r6 4 r2
-lhu r6 2 r2
+lhu r3 2 r2
 lbu r7 1 r2
 lui r1 1
 jal r4 16

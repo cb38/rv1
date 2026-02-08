@@ -271,13 +271,13 @@ class RV (config: RVConfig) extends Component {
         val rdInst   = Bits(32 bits)
         val rdPc     = Bits(32 bits)
 
-        val loadPending = RegInit(False)
+        val loadPending = RegInit(False) addAttribute("keep")
 
         rdData   := io.data_axi.r.data
         readDone := io.data_axi.r.fire
         when(io.data_axi.r.fire) { loadPending := False }
-        when(loadPending && !io.data_axi.r.fire) { execute.haltIt() ; decode.haltIt(); fetch.haltIt() }
-        when(io.data_axi.ar.fire) { loadPending := True }
+       // when(loadPending /*&& !io.data_axi.r.fire*/) { execute.haltIt() }
+        when(io.data_axi.ar.valid) { loadPending := True }
         // default values
         io.data_axi.aw.valid := False
         io.data_axi.aw.addr  := 0
@@ -750,6 +750,7 @@ class RV (config: RVConfig) extends Component {
     val rs2         = RS2_IMM
     val imm         = S(rs2(20 downto 0))
     val rd_addr     = RD_ADDR_FINAL
+    val haltRequest = False
 
    // val pc = PC.asUInt.simPublic()
     val valid = Bool().simPublic()
@@ -867,7 +868,7 @@ class RV (config: RVConfig) extends Component {
 
         
     }
-  
+   
     val lsu = new Area {
 
         val rd_wr    = False
@@ -878,7 +879,7 @@ class RV (config: RVConfig) extends Component {
         rd_wdata     := 0
         val mem_wdata = Bits(32 bits)
         mem_wdata := 0
-
+        
         val memRdData = Bits(32 bits)  
         memRdData := 0
           
@@ -889,10 +890,10 @@ class RV (config: RVConfig) extends Component {
             B"01" -> rs2(15 downto 0) ## rs2(15 downto 0),
             default -> rs2
           )                       
-          memory.WriteData(lsu_addr, mem_wdata, size)
+          when (isValid) { memory.WriteData(lsu_addr, mem_wdata, size) }
         }
         when (itype === InstrType.L) {
-          memory.ReadData(lsu_addr)
+            when (isValid) {memory.ReadData(lsu_addr)}
            when (memory.readDone === True) {
             rd_wr    := True  
             val ld_data_signed = !funct3(2)
@@ -907,7 +908,11 @@ class RV (config: RVConfig) extends Component {
                             default ->  rsp_data_shift_adj
                     )
             rd_wdata := data.asUInt
-           }
+           }.otherwise {
+             // else halt until load completes
+                execute.haltIt()
+                haltRequest := True
+           } 
         }
         
     }
@@ -1153,15 +1158,14 @@ class RV (config: RVConfig) extends Component {
     val formal = if (config.hasFormal) new Area {
         
         val execPc = PC.asUInt.resize(32)
-        val haltRequest = memory.loadPending && !memory.readDone
-        val rvfiCommit = (decode.isValid || irq_taken) && !haltRequest
+        
+        val rvfiRetire = execute.isValid && !flush && !haltRequest && (!memory.loadPending || memory.readDone)
 
-        when(rvfiCommit){
+        when(rvfiRetire){
             rvfiOrder := rvfiOrder + 1
         }
 
-        io.rvfi.valid := rvfiCommit
-
+        io.rvfi.valid := rvfiRetire
         when(isValid){
             io.rvfi.order     := rvfi.order
             io.rvfi.pc_rdata  := execPc
@@ -1469,7 +1473,7 @@ object RVSim extends App {
      
 
 
-   SimConfig.withFstWave.compile(new TopRV(config = RVConfig(supportFormal = false,
+   SimConfig.withFstWave.compile(new TopRV(config = RVConfig(supportFormal = true,
                                                  supportMul = false,
                                                  supportDiv = false,
                                                  supportCsr = false) )).doSim(seed = 2){ dut =>

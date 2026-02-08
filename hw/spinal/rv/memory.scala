@@ -234,7 +234,7 @@ class AXI4LiteReadOnly_Mem(axiLiteCfg: AxiLite4Config, config: MemConfig) extend
         val axi = slave(AxiLite4ReadOnly(axiLiteCfg))
     }
 
-    val mem = new Mem_1w_1rs(config, readUnderWrite = dontCare)
+    val mem = new Mem_1w_1rs(config, readUnderWrite = writeFirst)
 
    
     // default values for write port
