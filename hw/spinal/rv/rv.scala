@@ -301,7 +301,7 @@ class RV (config: RVConfig) extends Component {
 
         def Fetch(addr: UInt) = {
             io.instr_axi.ar.addr := addr.resized
-            io.instr_axi.ar.valid  := !loadPending && instrReqValid && !flush
+            io.instr_axi.ar.valid  := /*!loadPending && */ instrReqValid && !flush
             io.instr_axi.ar.prot  := B"000"
             PcReg := addr
         }
@@ -326,15 +326,15 @@ class RV (config: RVConfig) extends Component {
             val pc   = Bits(32 bits)
         }
 
-        val fetchFifo = new StreamFifo(FetchPacket(), 2,
+        val fetchFifo = new StreamFifo(FetchPacket(), depth = 4,
             withBypass = true,
             withAsyncRead = true,
             useVec = true
         )
 
-        val canRequest = RegNextWhen(coreinit,coreinit) && fetchFifo.io.push.ready 
+        val canRequest = (fetchFifo.io.availability > 2) && RegNextWhen(coreinit,coreinit) && fetchFifo.io.push.ready 
         instrMemory.instrReqValid := canRequest
-        when (canRequest) {
+        when (canRequest ) {
             instrMemory.Fetch(Iptr)
         }
         when(instrMemory.loadDone && canRequest) {
@@ -1459,14 +1459,14 @@ object RVSim extends App {
         }
   dut.clockDomain.forkStimulus(10)
   dut.io.irq #= false
-  var run = 50
+  var run = 60
   // init Regfile
   for (j <- 0 until 32 ) {
     dut.core.rv.RegFile.RegMem.setBigInt(j,0)
     println()
   }
   // run simulation and stop when instruction is 0
-   while(run>0 && (dut.core.rv.decoder.instr.toBigInt != 0 ||  dut.core.rv.decoder.pc.toBigInt < 4)) {
+   while(run>0 && (dut.core.rv.exec.instr.toBigInt != 0 ||  dut.core.rv.decoder.pc.toBigInt < 4)) {
         dut.clockDomain.waitSampling(1)
         run -= 1
         if (dut.core.rv.exec.valid.toBoolean)  {
