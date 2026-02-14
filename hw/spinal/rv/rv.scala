@@ -149,39 +149,6 @@ case class RVConfig(
     def hasFormal   = supportFormal
 }
 
-case class InstrReqIntfc(config: RVConfig) extends Bundle() {
-
-        val valid       = out(Bool)
-        val ready       = in(Bool)
-        val addr        = out(UInt(config.pcSize bits))
-}
-
-case class InstrRspIntfc(config: RVConfig) extends Bundle() {
-
-        val valid       = in(Bool)
-        val data        = in(Bits(32 bits))
-}
-
-case class DataReqIntfc(config: RVConfig) extends Bundle() {
-
-        val valid       = out(Bool)
-        val ready       = in(Bool)
-        
-        val rden        = out(Bool)
-        val rdaddr      = out(UInt(config.dataAddrSize bits))
-        val wraddr      = out(UInt(config.dataAddrSize bits))
-        val wren        = out(Bool)
-        
-        val size        = out(Bits(2 bits))
-        val data        = out(Bits(32 bits))
-
-}
-
-case class DataRspIntfc(config: RVConfig) extends Bundle() {
-
-        val valid       = in(Bool)
-        val data        = in(Bits(32 bits))
-}
 
 class RV (config: RVConfig) extends Component {
  
@@ -220,8 +187,8 @@ class RV (config: RVConfig) extends Component {
   // general
   val Iptr = Reg(UInt(32 bits)) init(0)
   val flush = Bool()
-  val init = RegInit(False)
-    init := True  
+  val coreinit = RegInit(False)
+    coreinit := True  
   val irqSyncStage0 = RegNext(io.irq).init(False)
   val irqSync       = RegNext(irqSyncStage0).init(False)
   
@@ -312,47 +279,45 @@ class RV (config: RVConfig) extends Component {
     }
 
     val instrMemory = new Area {
-        val rdInst   = Bits(32 bits)
-        val rdPc     = Bits(32 bits)
+  
+        val loadPending = RegInit(False) addAttribute("keep")
 
-        // instruction request from fetcher
-        val instrReqAddr  = UInt(config.pcSize bits)
-        val instrReqValid = Bool()
+        val rdInst   = Reg(Bits(32 bits)) init(0)
+        val rdPc     = Reg(Bits(32 bits)) init(0)
+        val PcReg    = Reg(UInt(32 bits)) init(0)
+        val rdValid   = RegInit(False)
+        val loadDone = Bool()
+        val instrReqValid = Bool() addAttribute("keep")
 
-        val instrPending    = RegInit(False)
-        val instrAddrReg    = Reg(UInt(config.pcSize bits)) init(0)
-        val instrRspValidReg = RegInit(False)
-        val instrRspDataReg  = Reg(Bits(32 bits)) init(0)
-        val instrRspPcReg    = Reg(UInt(32 bits)) init(0)
-        val instrReq_ready     = Bool()
-
-        io.instr_axi.ar.valid := instrReqValid && !instrPending && !flush
-        io.instr_axi.ar.addr  := instrReqAddr
+        // default values
+        io.instr_axi.ar.valid := False
+        io.instr_axi.ar.addr  := 0
         io.instr_axi.ar.prot  := B"000"
-        instrReq_ready        := io.instr_axi.ar.ready && !instrPending
+        io.instr_axi.r.ready  := True
 
-        when(io.instr_axi.ar.fire) {
-            instrPending := True
-            instrAddrReg := instrReqAddr
-        }
+        loadDone := io.instr_axi.r.fire
+        when(io.instr_axi.ar.fire) { loadPending := True }
+        when(!io.instr_axi.ar.valid) { loadPending := False }
 
-        io.instr_axi.r.ready := instrPending
-        when(io.instr_axi.r.fire) {
-            instrPending     := False
-            instrRspValidReg := True
-            instrRspDataReg  := io.instr_axi.r.data
-            instrRspPcReg    := instrAddrReg
-        } elsewhen(instrRspValidReg) {
-            instrRspValidReg := False
+        def Fetch(addr: UInt) = {
+            io.instr_axi.ar.addr := addr.resized
+            io.instr_axi.ar.valid  := !loadPending && instrReqValid && !flush
+            io.instr_axi.ar.prot  := B"000"
+            PcReg := addr
         }
 
         when(flush) {
-            instrPending     := False
-            instrRspValidReg := False
+            loadDone     := False
+            loadPending  := False
+            rdValid      := False
         }
-
-        rdInst := instrRspDataReg
-        rdPc   := instrRspPcReg.asBits
+        when (loadDone){
+            rdInst := io.instr_axi.r.data
+            rdPc   := PcReg.asBits
+            rdValid := True
+        } otherwise {
+            rdValid := False    
+        }
     }
   
     val fetcher = new fetch.Area {
@@ -367,14 +332,16 @@ class RV (config: RVConfig) extends Component {
             useVec = true
         )
 
-        val canRequest = fetchFifo.io.push.ready
+        val canRequest = RegNextWhen(coreinit,coreinit) && fetchFifo.io.push.ready 
         instrMemory.instrReqValid := canRequest
-        instrMemory.instrReqAddr  := Iptr
-        when(instrMemory.instrReqValid && instrMemory.instrReq_ready) {
+        when (canRequest) {
+            instrMemory.Fetch(Iptr)
+        }
+        when(instrMemory.loadDone && canRequest) {
             Iptr := Iptr + 4
         }
 
-        fetchFifo.io.push.valid          := instrMemory.instrRspValidReg
+        fetchFifo.io.push.valid          := instrMemory.rdValid
         fetchFifo.io.push.payload.inst   := instrMemory.rdInst
         fetchFifo.io.push.payload.pc     := instrMemory.rdPc
 
