@@ -267,13 +267,18 @@ class RV (config: RVConfig) extends Component {
     //mem
     val dataMemory = new Area {
         val readDone = Bool
+        val writeDone = Bool
         val rdData   = Bits(32 bits)
         val loadPending = RegInit(False) addAttribute("keep")
+        val writePending  = RegInit(False) addAttribute("keep")
 
         rdData   := io.data_axi.r.data
         readDone := io.data_axi.r.fire
+        writeDone := io.data_axi.b.fire
         when(io.data_axi.r.fire) { loadPending := False }
-        when(io.data_axi.ar.valid) { loadPending := True }
+        when(io.data_axi.ar.fire) { loadPending := True }
+        when(io.data_axi.w.fire ) { writePending := True }
+        when(io.data_axi.b.fire) { writePending := False }
 
         // default values
         io.data_axi.aw.valid := False
@@ -290,18 +295,18 @@ class RV (config: RVConfig) extends Component {
 
         def WriteData(addr: UInt, data: Bits, size: Bits) = {
             io.data_axi.aw.addr := addr.resized
-            io.data_axi.aw.valid  := True
+            io.data_axi.aw.valid  := !writePending
             io.data_axi.aw.prot  := B"000"
             io.data_axi.w.strb := size.mux(
                 B"00"   -> B"0001",
                 B"01"   -> B"0011",
                 default -> B"1111") |<< addr(1 downto 0)
             io.data_axi.w.data    := data
-            io.data_axi.w.valid   := True
+            io.data_axi.w.valid   := !writePending
         }
         def ReadData(addr: UInt) = {
             io.data_axi.ar.addr := addr.resized
-            io.data_axi.ar.valid  := True
+            io.data_axi.ar.valid  := !loadPending
             io.data_axi.ar.prot  := B"000"
         }
     }
@@ -734,7 +739,7 @@ class RV (config: RVConfig) extends Component {
 
     import decoder._
     val itype           = InstrType()
-    val instr           = Bits(32 bits)
+    val instr           = Bits(32 bits).simPublic()
     val funct3          = Bits(3 bits)
 
     itype           := ITYPE
@@ -750,7 +755,7 @@ class RV (config: RVConfig) extends Component {
     val rd_addr     = RD_ADDR_FINAL
     val haltRequest = False
 
-   // val pc = PC.asUInt.simPublic()
+    val pc = PC.asUInt.simPublic()
     val valid = Bool().simPublic()
     valid := up.isValid
     flush := False 
@@ -880,18 +885,20 @@ class RV (config: RVConfig) extends Component {
         
         val memRdData = Bits(32 bits)  
         memRdData := 0
-          
-        when (itype === InstrType.S) {
-           
-            mem_wdata := size.mux[Bits](
-            B"00" -> rs2(7 downto 0) ## rs2(7 downto 0) ## rs2(7 downto 0) ## rs2(7 downto 0),
-            B"01" -> rs2(15 downto 0) ## rs2(15 downto 0),
-            default -> rs2
-          )                       
-          when (isValid) { dataMemory.WriteData(lsu_addr, mem_wdata, size) }
+        // halt until memory operation is done
+        haltWhen(!dataMemory.readDone && itype === InstrType.L)
+        haltWhen(!dataMemory.writeDone && itype === InstrType.S)
+
+        when (itype === InstrType.S) {   
+                  mem_wdata := size.mux[Bits](
+                    B"00" -> rs2(7 downto 0) ## rs2(7 downto 0) ## rs2(7 downto 0) ## rs2(7 downto 0),
+                    B"01" -> rs2(15 downto 0) ## rs2(15 downto 0),
+                    default -> rs2)
+                   dataMemory.WriteData(lsu_addr, mem_wdata, size)
+   
         }
         when (itype === InstrType.L) {
-            when (isValid) {dataMemory.ReadData(lsu_addr)}
+           dataMemory.ReadData(lsu_addr)
            when (dataMemory.readDone === True) {
             rd_wr    := True  
             val ld_data_signed = !funct3(2)
@@ -906,12 +913,9 @@ class RV (config: RVConfig) extends Component {
                             default ->  rsp_data_shift_adj
                     )
             rd_wdata := data.asUInt
-           }.otherwise {
-             // else halt until load completes
-                execute.haltIt()
-                haltRequest := True
-           } 
+            }
         }
+            
         
     }
     
@@ -1498,8 +1502,8 @@ object RVSim extends App {
    while(run>0 && (dut.core.rv.decoder.instr.toBigInt != 0 ||  dut.core.rv.decoder.pc.toBigInt < 4)) {
         dut.clockDomain.waitSampling(1)
         run -= 1
-        if (dut.core.rv.decoder.valid.toBoolean)  {
-             printf("PC: %08X, INST: %08X",dut.core.rv.decoder.pc.toBigInt, dut.core.rv.decoder.instr.toBigInt)
+        if (dut.core.rv.exec.valid.toBoolean)  {
+             printf("PC: %08X, INST: %08X",dut.core.rv.exec.pc.toBigInt, dut.core.rv.exec.instr.toBigInt)
              // print status of reg 0-7 
                 for (j <- 1 until 8 ) {
                     printf(" x%02d: %08X  ", j,dut.core.rv.RegFile.RegMem.getBigInt(j))
@@ -1509,7 +1513,7 @@ object RVSim extends App {
     }
   // read value from regfile
   println("value of Regfile at the  end of simu") 
-  for (j <- 0 until 32 by 2) {
+  for (j <- 0 until 16 by 2) {
     printf("x%02d:  %08X   x%02d:  %08X ", j,dut.core.rv.RegFile.RegMem.getBigInt(j),j+1,dut.core.rv.RegFile.RegMem.getBigInt(j+1))
     println()
   }
@@ -1519,8 +1523,8 @@ object RVSim extends App {
         printf("mem[%02d]:  %08X   mem[%02d]:  %08X ", j,dataMem.getBigInt(j),j+1,dataMem.getBigInt(j+1))
         println()  
     }
-        // check r1 is 0 then test passed
-    if(dut.core.rv.RegFile.RegMem.getBigInt(1) == 0){
+        // check r1 is 0 and r4 is x34 then test passed
+    if(dut.core.rv.RegFile.RegMem.getBigInt(1) == 0 && dut.core.rv.RegFile.RegMem.getBigInt(4) == 0x34){
         println("Test passed!")
     } else {
         println("Test failed!") 
