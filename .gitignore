@@ -3,6 +3,6 @@ tmp/*
 project/*
 .b*
 .m*
-sim*
+simWorkspace/
 hw/gen
 old/*
