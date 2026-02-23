@@ -99,9 +99,9 @@ object Assembler {
 object RVVerilog extends App {
   val config=SpinalConfig(device=Device.XILINX,targetDirectory = "hw/gen",mergeAsyncProcess = true)
  
-  config.generateVerilog(new RV(config = RVConfig(supportFormal = true,
+  config.generateVerilog(new RV(config = RVConfig(supportFormal = false,
                                                  supportMul = false,
-                                                 supportDiv = false,
+                                                 supportDiv = true,
                                                  supportCsr = true,
                                                  bootVector = BigInt("80000040", 16)))).printPruned()
 }

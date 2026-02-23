@@ -178,12 +178,7 @@ void tb_cxxrtl_top::step(const tb_cli_args &args, mem_io_state &memio) {
 		TB_DBG(cycle, "[dbg] r data=%08x resp=%u\n", resp.rdata, resp.err ? 2u : 0u);
 	}
 
-	if (top.p_cpu_2e_rvfi__valid.get<bool>()) {
-		uint64_t order = top.p_cpu_2e_rvfi__order.get<uint64_t>();
-		uint32_t pc = top.p_cpu_2e_rvfi__pc__rdata.get<uint32_t>();
-		uint32_t insn = top.p_cpu_2e_rvfi__insn.get<uint32_t>();
-		TB_DBG(cycle, "[rvfi] order=%llu pc=%08x insn=%08x\n", (unsigned long long)order, pc, insn);
-	}
+	
 
 	// Handle data write AXI transactions
 	static bool aw_pending = false;
