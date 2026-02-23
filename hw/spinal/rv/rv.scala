@@ -206,6 +206,7 @@ class RV (config: RVConfig) extends Component {
         )
     )).setName("data_axi")
     val irq       = in(Bool).setName("irq")
+    val timer_irq = in(Bool).setName("timer_irq")
   }
 
 
@@ -216,6 +217,8 @@ class RV (config: RVConfig) extends Component {
     coreinit := True  
   val irqSyncStage0 = RegNext(io.irq).init(False)
   val irqSync       = RegNext(irqSyncStage0).init(False)
+    val timerIrqSyncStage0 = RegNext(io.timer_irq).init(False)
+    val timerIrqSync       = RegNext(timerIrqSyncStage0).init(False)
   
   //val isData = False
   
@@ -253,6 +256,7 @@ class RV (config: RVConfig) extends Component {
 
     if(config.hasCsr){
             CsrRegs.mip(11) := irqSync
+            CsrRegs.mip(7)  := timerIrqSync
     }
   
  
@@ -920,11 +924,17 @@ class RV (config: RVConfig) extends Component {
         val irq_target = U(0, 32 bits)
         val mret_taken = False
         val mret_target = U(0, 32 bits)
-        val irqCauseValue = B(BigInt("8000000B", 16), 32 bits) 
+        val irqCauseExternal = B(BigInt("8000000B", 16), 32 bits)
+        val irqCauseTimer    = B(BigInt("80000007", 16), 32 bits)
         val mie_meie    = CsrRegs.mie(11)
         val mip_meip    = CsrRegs.mip(11)
+        val mie_mtie    = CsrRegs.mie(7)
+        val mip_mtip    = CsrRegs.mip(7)
         val mstatus_mie = CsrRegs.mstatus(3)
-        val irq_pending = mie_meie && mip_meip && mstatus_mie
+        val ext_irq_pending   = mie_meie && mip_meip
+        val timer_irq_pending = mie_mtie && mip_mtip
+        val irq_pending = (ext_irq_pending || timer_irq_pending) && mstatus_mie
+        val irqCauseValue = ext_irq_pending ? irqCauseExternal | irqCauseTimer
         val take_irq    = irq_pending && !valid 
         val mtvec_base  = (CsrRegs.mtvec(31 downto 2) ## B"00")
         val isMret      = (itype === InstrType.E) && (instr(31 downto 20) === B"001100000010")

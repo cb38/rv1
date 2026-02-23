@@ -117,6 +117,7 @@ class RVTop(config: RVConfig) extends Component {
 
         val button = in(Bool)
         val irq    = in(Bool)
+        val timer_irq = in(Bool)
     }
 
     
@@ -145,6 +146,7 @@ class RVTop(config: RVConfig) extends Component {
         rv.io.instr_axi <> instrMem.io.axi
         rv.io.data_axi  <> dataMem.io.axi
         rv.io.irq       := io.irq
+        rv.io.timer_irq := io.timer_irq
 
         val awSeen = RegInit(False)
         val wSeen  = RegInit(False)
@@ -217,6 +219,7 @@ object RVSim extends App {
         }
   dut.clockDomain.forkStimulus(10)
   dut.io.irq #= false
+  dut.io.timer_irq #= false
   var run = 60
   // init Regfile
   for (j <- 0 until 32 ) {

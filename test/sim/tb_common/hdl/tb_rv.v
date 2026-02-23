@@ -120,6 +120,7 @@ RV cpu (
 	.data_axi_r_payload_resp    (d_axi_r_resp),
 	
 	.irq                        (irq),
+	.timer_irq                  (timer_irq[0]),
 	.clk                        (clk),
 	.reset                      (~rst_n)
 );
