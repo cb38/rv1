@@ -23,6 +23,7 @@ object Opcodes extends SpinalEnum {
     def F           = B"0001111"
     def SYS         = B"1110011"
 }
+
 object InstrFormat extends SpinalEnum(binaryOneHot) {
     val R       = newElement()
     val I       = newElement()
@@ -75,6 +76,10 @@ object MulOp extends SpinalEnum(binaryOneHot) {
     val MULH    = newElement()
     val MULHSU  = newElement()
     val MULHU   = newElement()
+    val DIV     = newElement()
+    val DIVU    = newElement()
+    val REM     = newElement()
+    val REMU    = newElement()
 }
 
 case class RVFI() extends Bundle {
@@ -155,8 +160,7 @@ case class CsrPipe() extends Bundle {
 }
 
 case class RVConfig(
-                supportMul      : Boolean = false,
-                supportDiv      : Boolean = false,
+                supportMulDiv   : Boolean = false,
                 supportCsr      : Boolean = false,
                 supportFormal   : Boolean = false,
                 supportFence    : Boolean = false,
@@ -165,8 +169,7 @@ case class RVConfig(
                 bootVector      : BigInt  = BigInt(0)
                 ) {
 
-    def hasMul      = supportMul
-    def hasDiv      = supportDiv
+    def hasMulDiv   = supportMulDiv
     def hasCsr      = supportCsr
     def hasFence    = supportFence
 
@@ -513,7 +516,7 @@ class RV (config: RVConfig) extends Component {
             when(funct7 === B"0000001"){
                 switch(funct3){
                     is(B"000"){
-                        if(config.hasMul){
+                        if(config.hasMulDiv){
                             itype   := InstrType.MULDIV
                             mul_op  := MulOp.MUL
                         } else {
@@ -521,7 +524,7 @@ class RV (config: RVConfig) extends Component {
                         }
                     }
                     is(B"001"){
-                        if(config.hasMul){
+                        if(config.hasMulDiv){
                             itype   := InstrType.MULDIV
                             mul_op  := MulOp.MULH
                         } else {
@@ -529,7 +532,7 @@ class RV (config: RVConfig) extends Component {
                         }
                     }
                     is(B"010"){
-                        if(config.hasMul){
+                        if(config.hasMulDiv){
                             itype   := InstrType.MULDIV
                             mul_op  := MulOp.MULHSU
                         } else {
@@ -537,15 +540,44 @@ class RV (config: RVConfig) extends Component {
                         }
                     }
                     is(B"011"){
-                        if(config.hasMul){
+                        if(config.hasMulDiv){
                             itype   := InstrType.MULDIV
                             mul_op  := MulOp.MULHU
                         } else {
                             itype   := InstrType.Undef
                         }
                     }
-                    default {
-                        itype := InstrType.Undef
+                    is(B"100"){
+                        if(config.hasMulDiv){
+                            itype   := InstrType.MULDIV
+                            mul_op  := MulOp.DIV
+                        } else {
+                            itype   := InstrType.Undef
+                        }
+                    }
+                    is(B"101"){
+                        if(config.hasMulDiv){
+                            itype   := InstrType.MULDIV
+                            mul_op  := MulOp.DIVU
+                        } else {
+                            itype   := InstrType.Undef
+                        }
+                    }
+                    is(B"110"){
+                        if(config.hasMulDiv){
+                            itype   := InstrType.MULDIV
+                            mul_op  := MulOp.REM
+                        } else {
+                            itype   := InstrType.Undef
+                        }
+                    }
+                    is(B"111"){
+                        if(config.hasMulDiv){
+                            itype   := InstrType.MULDIV
+                            mul_op  := MulOp.REMU
+                        } else {
+                            itype   := InstrType.Undef
+                        }
                     }
                 }
             } otherwise {
@@ -987,7 +1019,7 @@ class RV (config: RVConfig) extends Component {
     }
        
    
-    val mul =  if(config.hasMul) new Area {
+        val mul =  if(config.hasMulDiv) new Area {
             val opSel      = MulOp()
             opSel         := MUL_OP
             val mulValid   = (itype === InstrType.MULDIV) && execute.isValid
@@ -998,6 +1030,26 @@ class RV (config: RVConfig) extends Component {
             val mul_ss     = (op1_s64 * op2_s64).asBits
             val mul_su     = (op1_s64 * op2_u_s64).asBits
             val mul_uu     = (U(op1).resize(64) * U(op2).resize(64)).asBits
+
+            val divByZero       = (op2 === 0)
+            val signedOverflow  = (op1.asBits === B(BigInt("80000000", 16), 32 bits)) && (op2.asBits === B(BigInt("FFFFFFFF", 16), 32 bits))
+            val divSignedNorm   = (op1 / op2).asBits
+            val divUnsignedNorm = (op1.asUInt / op2.asUInt).asBits
+            val remSignedNorm   = (op1 % op2).asBits
+            val remUnsignedNorm = (op1.asUInt % op2.asUInt).asBits
+
+            val divSignedRes = Bits(32 bits)
+            val divUnsignedRes = Bits(32 bits)
+            val remSignedRes = Bits(32 bits)
+            val remUnsignedRes = Bits(32 bits)
+
+            divSignedRes := divByZero ? B(BigInt("FFFFFFFF", 16), 32 bits) |
+                    (signedOverflow ? B(BigInt("80000000", 16), 32 bits) | divSignedNorm)
+            divUnsignedRes := divByZero ? B(BigInt("FFFFFFFF", 16), 32 bits) | divUnsignedNorm
+            remSignedRes := divByZero ? op1.asBits |
+                    (signedOverflow ? B(0, 32 bits) | remSignedNorm)
+            remUnsignedRes := divByZero ? op1.asBits | remUnsignedNorm
+
             val rd_wr      = False
             val rd_wdata   = U(0,32 bits)
             val result     = U(0, 32 bits)
@@ -1014,6 +1066,18 @@ class RV (config: RVConfig) extends Component {
                 }
                 is(MulOp.MULHU){
                     result := U(mul_uu(63 downto 32))
+                }
+                is(MulOp.DIV){
+                    result := U(divSignedRes)
+                }
+                is(MulOp.DIVU){
+                    result := U(divUnsignedRes)
+                }
+                is(MulOp.REM){
+                    result := U(remSignedRes)
+                }
+                is(MulOp.REMU){
+                    result := U(remUnsignedRes)
                 }
             }
             when(mulValid && (opSel =/= MulOp.NONE)){

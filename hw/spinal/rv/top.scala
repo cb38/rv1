@@ -100,8 +100,7 @@ object RVVerilog extends App {
   val config=SpinalConfig(device=Device.XILINX,targetDirectory = "hw/gen",mergeAsyncProcess = true)
  
   config.generateVerilog(new RV(config = RVConfig(supportFormal = false,
-                                                 supportMul = false,
-                                                 supportDiv = true,
+                                                 supportMulDiv = true,
                                                  supportCsr = true,
                                                  bootVector = BigInt("80000040", 16)))).printPruned()
 }
@@ -184,8 +183,7 @@ object RVTopVerilog extends App {
   val config=SpinalConfig(device=Device.XILINX,targetDirectory = "hw/gen",mergeAsyncProcess = true)
  
   config.generateVerilog(new RVTop(config = RVConfig(supportFormal = false,
-                                                 supportMul = false,
-                                                 supportDiv = false,
+                                                 supportMulDiv = false,
                                                  supportCsr = false,
                                                  pcSize = 16,
                                                  dataAddrSize = 16,
@@ -200,8 +198,7 @@ object RVSim extends App {
 
 
    SimConfig.withFstWave.compile(new RVTop(config = RVConfig(supportFormal = true,
-                                                 supportMul = false,
-                                                 supportDiv = false,
+                                                 supportMulDiv = false,
                                                  supportCsr = false,
                                                  pcSize = 32,
                                                  dataAddrSize = 32,
