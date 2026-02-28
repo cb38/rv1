@@ -84,7 +84,7 @@ bus_response tb_mem_access(tb_top &tb, mem_io_state &memio, bus_request req) {
 			resp.err = true;
 		} else if (req.addr >= MEM_BASE && req.addr <= MEM_BASE + MEM_SIZE - (1u << (int)req.size)) {
 			unsigned int n_bytes = 1u << (int)req.size;
-			// Note we are relying on hazard3's byte lane replication
+			// Note we are relying on rv's byte lane replication
 			for (unsigned int i = 0; i < n_bytes; ++i) {
 				memio.mem[req.addr + i - MEM_BASE] = req.wdata >> (8 * i) & 0xffu;
 			}

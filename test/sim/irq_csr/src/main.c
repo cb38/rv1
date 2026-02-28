@@ -1,6 +1,6 @@
 #include <stdint.h>
 #include "tb_cxxrtl_io.h"
-#include "hazard3_csr.h"
+#include "rv_csr.h"
 
 // Global status captured by the IRQ handler and checked in main.
 volatile uint32_t g_ext_irq_count = 0;

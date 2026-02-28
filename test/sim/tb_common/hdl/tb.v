@@ -73,7 +73,7 @@ wire dmihardreset_req;
 wire assert_dmi_reset = !rst_n || dmihardreset_req;
 wire rst_n_dmi;
 
-hazard3_reset_sync dmi_reset_sync_u (
+rv_reset_sync dmi_reset_sync_u (
 	.clk       (clk),
 	.rst_n_in  (!assert_dmi_reset),
 	.rst_n_out (rst_n_dmi)
@@ -83,10 +83,10 @@ hazard3_reset_sync dmi_reset_sync_u (
 // value for a 1:2 TCK:clk_dmi ratio. OpenOCD doesn't particularly care
 // because it will just increase idle cycles until it stops seeing BUSY.
 
-hazard3_jtag_dtm #(
+rv_jtag_dtm #(
 	.IDCODE          (IDCODE),
 	.DTMCS_IDLE_HINT (8)
-) inst_hazard3_jtag_dtm (
+) inst_rv_jtag_dtm (
 	.tck              (tck),
 	.trst_n           (trst_n),
 	.tms              (tms),
@@ -141,7 +141,7 @@ wire                      sbus_err;
 wire [31:0]               sbus_wdata;
 wire [31:0]               sbus_rdata;
 
-hazard3_dm #(
+rv_dm #(
 	.N_HARTS      (N_HARTS),
 	.HAVE_SBA     (1),
 	.NEXT_DM_ADDR (0)
@@ -196,7 +196,7 @@ hazard3_dm #(
 wire assert_cpu_reset = !rst_n || sys_reset_req || hart_reset_req[0];
 wire rst_n_cpu;
 
-hazard3_reset_sync cpu_reset_sync (
+rv_reset_sync cpu_reset_sync (
 	.clk       (clk),
 	.rst_n_in  (!assert_cpu_reset),
 	.rst_n_out (rst_n_cpu)
@@ -258,8 +258,8 @@ end
 `endif
 `include `CONFIG_HEADER
 
-hazard3_cpu_2port #(
-`include "hazard3_config_inst.vh"
+rv_cpu_2port #(
+`include "rv_config_inst.vh"
 ) cpu (
 	.clk                        (clk),
 	.clk_always_on              (clk),
