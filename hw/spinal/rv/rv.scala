@@ -87,6 +87,9 @@ case class RVFI() extends Bundle {
     val valid       = Bool
     val order       = UInt(64 bits)
     val insn        = Bits(32 bits)
+    val insn_raw    = Bits(32 bits)
+    val insn_is_c   = Bool
+    val insn_len    = UInt(3 bits)
     val trap        = Bool
     val halt        = Bool
     val intr        = Bool
@@ -116,6 +119,9 @@ case class RVFI() extends Bundle {
         valid     init(False) addAttribute("keep")
         order     init(0) addAttribute("keep")
         insn      init(0) addAttribute("keep")
+        insn_raw  init(0) addAttribute("keep")
+        insn_is_c init(False) addAttribute("keep")
+        insn_len  init(4) addAttribute("keep")
         trap      init(False) addAttribute("keep")
         halt      init(False) addAttribute("keep")
         intr      init(False) addAttribute("keep")
@@ -161,6 +167,7 @@ case class CsrPipe() extends Bundle {
 
 case class RVConfig(
                 supportMulDiv   : Boolean = false,
+                supportCompressed : Boolean = false,
                 supportCsr      : Boolean = false,
                 supportFormal   : Boolean = false,
                 supportFence    : Boolean = false,
@@ -170,6 +177,7 @@ case class RVConfig(
                 ) {
 
     def hasMulDiv   = supportMulDiv
+    def hasCompressed = supportCompressed
     def hasCsr      = supportCsr
     def hasFence    = supportFence
 
@@ -177,6 +185,180 @@ case class RVConfig(
     def hasFormal   = supportFormal
 }
 
+object RVCDecomp {
+     def main(args: Array[String]): Unit = {
+    SpinalVerilog(new Component{
+      out(apply(in Bits(16 bits)))
+    }.setDefinitionName("Decompressor"))
+  }
+
+ 
+     def apply(raw: Bits): Bits = {
+        val c = raw(15 downto 0)
+        val cQuad = c(1 downto 0)
+        val cFunct3 = c(15 downto 13)
+
+        def sext(src: Bits, to: Int): Bits = B(S(src).resize(to))
+        def encI(imm: Bits, rs1: UInt, funct3: Bits, rd: UInt, opcode: Bits): Bits =
+            imm(11 downto 0) ## rs1.asBits ## funct3 ## rd.asBits ## opcode
+        def encR(funct7: Bits, rs2: UInt, rs1: UInt, funct3: Bits, rd: UInt, opcode: Bits): Bits =
+            funct7 ## rs2.asBits ## rs1.asBits ## funct3 ## rd.asBits ## opcode
+        def encS(imm: Bits, rs2: UInt, rs1: UInt, funct3: Bits, opcode: Bits): Bits =
+            imm(11 downto 5) ## rs2.asBits ## rs1.asBits ## funct3 ## imm(4 downto 0) ## opcode
+        def encB(imm: Bits, rs2: UInt, rs1: UInt, funct3: Bits, opcode: Bits): Bits =
+            imm(12) ## imm(10 downto 5) ## rs2.asBits ## rs1.asBits ## funct3 ## imm(4 downto 1) ## imm(11) ## opcode
+        def encU(imm: Bits, rd: UInt, opcode: Bits): Bits =
+            imm(31 downto 12) ## rd.asBits ## opcode
+        def encJ(imm: Bits, rd: UInt, opcode: Bits): Bits =
+            imm(20) ## imm(10 downto 1) ## imm(11) ## imm(19 downto 12) ## rd.asBits ## opcode
+
+        val rd  = U(c(11 downto 7))
+        val rs1p = U(B"01" ## c(9 downto 7))
+        val rs2p = U(B"01" ## c(4 downto 2))
+
+        val decomp = Bits(32 bits)
+        decomp := B(0, 32 bits)
+
+        switch(cQuad){
+            is(B"00"){
+                switch(cFunct3){
+                    is(B"000"){
+                        val imm = B(32 bits, default -> false)
+                        imm(9 downto 6) := c(10 downto 7)
+                        imm(5 downto 4) := c(12 downto 11)
+                        imm(3) := c(5)
+                        imm(2) := c(6)
+                        when(c(12 downto 5) =/= 0){
+                            decomp := encI(imm(11 downto 0), U(2, 5 bits), B"000", rs2p, B"0010011")
+                        }
+                    }
+                    is(B"010"){
+                        val imm = B(12 bits, default -> false)
+                        imm(6) := c(5)
+                        imm(5 downto 3) := c(12 downto 10)
+                        imm(2) := c(6)
+                        decomp := encI(imm, rs1p, B"010", rs2p, B"0000011")
+                    }
+                    is(B"110"){
+                        val imm = B(12 bits, default -> false)
+                        imm(6) := c(5)
+                        imm(5 downto 3) := c(12 downto 10)
+                        imm(2) := c(6)
+                        decomp := encS(imm, rs2p, rs1p, B"010", B"0100011")
+                    }
+                }
+            }
+            is(B"01"){
+                switch(cFunct3){
+                    is(B"000"){
+                        val imm = sext(c(12) ## c(6 downto 2), 12)
+                        decomp := encI(imm(11 downto 0), rd, B"000", rd, B"0010011")
+                    }
+                    is(B"001"){
+                        val jimm = sext(c(12) ## c(8) ## c(10 downto 9) ## c(6) ## c(7) ## c(2) ## c(11) ## c(5 downto 3) ## B"0", 21)
+                        decomp := encJ(jimm(20 downto 0), U(1, 5 bits), B"1101111")
+                    }
+                    is(B"010"){
+                        val imm = sext(c(12) ## c(6 downto 2), 12)
+                        decomp := encI(imm(11 downto 0), U(0, 5 bits), B"000", rd, B"0010011")
+                    }
+                    is(B"011"){
+                        when(rd === U(2, 5 bits)){
+                            val imm = sext(c(12) ## c(4 downto 3) ## c(5) ## c(2) ## c(6) ## B"0000", 12)
+                            decomp := encI(imm(11 downto 0), U(2, 5 bits), B"000", U(2, 5 bits), B"0010011")
+                        } otherwise {
+                            val uimm = sext(c(12) ## c(6 downto 2) ## B(12 bits, default -> false), 32)
+                            decomp := encU(uimm, rd, B"0110111")
+                        }
+                    }
+                    is(B"100"){
+                        when(c(11 downto 10) === B"00"){
+                            val shamt = B(12 bits, default -> false)
+                            shamt(5) := c(12)
+                            shamt(4 downto 0) := c(6 downto 2)
+                            decomp := encI(shamt, rs1p, B"101", rs1p, B"0010011")
+                        } elsewhen(c(11 downto 10) === B"01"){
+                            val shamt = B(12 bits, default -> false)
+                            shamt(5) := c(12)
+                            shamt(4 downto 0) := c(6 downto 2)
+                            decomp := encI(B"010000" ## shamt(5 downto 0), rs1p, B"101", rs1p, B"0010011")
+                        } elsewhen(c(11 downto 10) === B"10"){
+                            val imm = sext(c(12) ## c(6 downto 2), 12)
+                            decomp := encI(imm(11 downto 0), rs1p, B"111", rs1p, B"0010011")
+                        } otherwise {
+                            when(c(12) === False){
+                                switch(c(6 downto 5)){
+                                    is(B"00"){ decomp := encR(B"0100000", rs2p, rs1p, B"000", rs1p, B"0110011") }
+                                    is(B"01"){ decomp := encR(B"0000000", rs2p, rs1p, B"100", rs1p, B"0110011") }
+                                    is(B"10"){ decomp := encR(B"0000000", rs2p, rs1p, B"110", rs1p, B"0110011") }
+                                    is(B"11"){ decomp := encR(B"0000000", rs2p, rs1p, B"111", rs1p, B"0110011") }
+                                }
+                            }
+                        }
+                    }
+                    is(B"101"){
+                        val jimm = sext(c(12) ## c(8) ## c(10 downto 9) ## c(6) ## c(7) ## c(2) ## c(11) ## c(5 downto 3) ## B"0", 21)
+                        decomp := encJ(jimm(20 downto 0), U(0, 5 bits), B"1101111")
+                    }
+                    is(B"110"){
+                        val bimm = sext(c(12) ## c(6 downto 5) ## c(2) ## c(11 downto 10) ## c(4 downto 3) ## B"0", 13)
+                        decomp := encB(bimm(12 downto 0), U(0, 5 bits), rs1p, B"000", B"1100011")
+                    }
+                    is(B"111"){
+                        val bimm = sext(c(12) ## c(6 downto 5) ## c(2) ## c(11 downto 10) ## c(4 downto 3) ## B"0", 13)
+                        decomp := encB(bimm(12 downto 0), U(0, 5 bits), rs1p, B"001", B"1100011")
+                    }
+                }
+            }
+            is(B"10"){
+                switch(cFunct3){
+                    is(B"000"){
+                        val shamt = B(12 bits, default -> false)
+                        shamt(5) := c(12)
+                        shamt(4 downto 0) := c(6 downto 2)
+                        decomp := encI(shamt, rd, B"001", rd, B"0010011")
+                    }
+                    is(B"010"){
+                        val imm = B(12 bits, default -> false)
+                        imm(5) := c(12)
+                        imm(4 downto 2) := c(6 downto 4)
+                        imm(7 downto 6) := c(3 downto 2)
+                        when(rd =/= U(0, 5 bits)){
+                            decomp := encI(imm, U(2, 5 bits), B"010", rd, B"0000011")
+                        }
+                    }
+                    is(B"100"){
+                        when(c(12) === False){
+                            when(c(6 downto 2) === B"00000"){
+                                decomp := encI(B(12 bits, default -> false), rd, B"000", U(0, 5 bits), B"1100111")
+                            } otherwise {
+                                decomp := encR(B"0000000", U(c(6 downto 2)), U(0, 5 bits), B"000", rd, B"0110011")
+                            }
+                        } otherwise {
+                            when((rd === U(0, 5 bits)) && (c(6 downto 2) === B"00000")){
+                                decomp := B(BigInt("00100073", 16), 32 bits)
+                            } elsewhen(c(6 downto 2) === B"00000"){
+                                decomp := encI(B(12 bits, default -> false), rd, B"000", U(1, 5 bits), B"1100111")
+                            } otherwise {
+                                decomp := encR(B"0000000", U(c(6 downto 2)), rd, B"000", rd, B"0110011")
+                            }
+                        }
+                    }
+                    is(B"110"){
+                        val imm = B(12 bits, default -> false)
+                        imm(5 downto 2) := c(12 downto 9)
+                        imm(7 downto 6) := c(8 downto 7)
+                        decomp := encS(imm, U(c(6 downto 2)), U(2, 5 bits), B"010", B"0100011")
+                    }
+                }
+            }
+        }
+
+        decomp
+    }
+  
+
+}
 
 class RV (config: RVConfig) extends Component {
  
@@ -185,6 +367,7 @@ class RV (config: RVConfig) extends Component {
   val d2e = StageLink(decode.down, execute.up)
   // payload
   val INSTRUCTION = Payload(Bits(32 bits))
+  val DECODED_INSTR = Payload(Bits(32 bits))  // decompressed instruction for execute
   val PC = Payload(Bits(32 bits))
   val rvfi = if (config.hasFormal) Payload(RVFI()) else null
   val rvfiOrder = if (config.hasFormal) Reg(UInt(64 bits)) init(0) else null
@@ -215,6 +398,7 @@ class RV (config: RVConfig) extends Component {
 
   // general
     val Iptr = Reg(UInt(32 bits)) init(U(config.bootVector, 32 bits))
+    val nextTrapPc = Reg(UInt(32 bits)) init(U(config.bootVector, 32 bits))
   val flush = Bool()
   val coreinit = RegInit(False)
     coreinit := True  
@@ -375,32 +559,164 @@ class RV (config: RVConfig) extends Component {
             withAsyncRead = true,
             useVec = true
         )
+     
+        val rvc = if(config.hasCompressed) new Area {
+            val case2a = Bool() 
+            val stop = RegInit(False)
 
-        val canRequest = (fetchFifo.io.availability > 2) && RegNext(coreinit) && fetchFifo.io.push.ready 
-        instrMemory.instrReqValid := canRequest
-        when (canRequest ) {
-            instrMemory.Fetch(Iptr)
+            val canRequest = (fetchFifo.io.availability > 2) && RegNext(coreinit) && fetchFifo.io.push.ready && !stop 
+            instrMemory.instrReqValid := canRequest
+            when (canRequest ) {
+                instrMemory.Fetch(Iptr)
+            }
+            when(instrMemory.loadDone && canRequest) {
+                Iptr := Iptr + 4
+            }
+            // push to fifo from memory
+            fetchFifo.io.push.valid          := instrMemory.rdValid
+            fetchFifo.io.push.payload.inst   := instrMemory.rdInst
+            fetchFifo.io.push.payload.pc     := instrMemory.rdPc
+            fetchFifo.io.pop.ready := down.ready && !stop
+            fetchFifo.io.flush     := flush
+
+            // split fifo out into high and low half
+            val lo = fetchFifo.io.pop.payload.inst(15 downto 0)
+            val hi = fetchFifo.io.pop.payload.inst(31 downto 16)
+            val instr_hi_is_rvi = (hi(1 downto 0) === B"11") // 32b instruction
+            val instr_lo_is_rvi = (lo(1 downto 0) === B"11") // 32b instruction
+            val instr_push = Bits(32 bits)
+            val unaligned_lo = Reg(Bits(16 bits)) init(0)
+            val pc_unaligned = Reg(Bool()) init(False)
+            val instr32b_unaligned = Reg(Bool()) init(False)
+            val instr16b_unaligned = Reg(Bool()) init(False)
+            val savedPc = Reg(UInt(32 bits)) init(0)
+            
+            // 4  cases for compressed instructions:
+            // 1. lo is 32b -> push 32b 
+            // 2a. lo is 16b and hi is 16b   -> push lo, save PC, stop FIFO
+            // 2b. lo is 16b and hi is 16b   -> push hi from register, resume FIFO
+            // 3. lo is 16b and hi is 32b ( split in two words ) -> push lo then store hi for next cycle
+            // 4. lo is the hi part half of the previously unaligned 32b instruction -> push reconstructed 32b 
+            when (down.ready && (fetchFifo.io.pop.valid || instr16b_unaligned)) {
+                // Only update unaligned_lo when pipeline advances,
+                // to avoid corruption during stalls (hi changes due to FIFO pop)
+                unaligned_lo := hi
+
+                when (instr32b_unaligned) { // case 4
+                    instr_push := lo ## unaligned_lo  
+                    when (instr_hi_is_rvi) {
+                        pc_unaligned := True
+                        instr32b_unaligned := True
+                        instr16b_unaligned := False
+                        stop := False
+                    } otherwise { 
+                        pc_unaligned := True
+                        instr32b_unaligned := False
+                        instr16b_unaligned := True
+                        stop := True
+                    }
+                } elsewhen (instr_lo_is_rvi && !instr16b_unaligned ) { // case 1
+                    instr_push := hi ## lo
+                    pc_unaligned := False
+                    instr32b_unaligned := False
+                    instr16b_unaligned := False
+                    stop := False
+                } elsewhen  (instr_hi_is_rvi && !instr16b_unaligned) { // case 3
+                    instr_push := lo.resized
+                    pc_unaligned := True
+                    instr32b_unaligned := True
+                    instr16b_unaligned := False
+                    stop := False
+                } otherwise { // case 2
+                    when (instr16b_unaligned) { // case 2b
+                        instr_push := unaligned_lo.resized
+                        pc_unaligned := False
+                        instr32b_unaligned := False
+                        instr16b_unaligned := False
+                        stop := False
+                    } otherwise { // case 2a
+                        instr_push := lo.resized
+                        pc_unaligned := True
+                        instr32b_unaligned := False
+                        instr16b_unaligned := True
+                        savedPc := fetchFifo.io.pop.payload.pc.asUInt
+                        stop := True
+                    }
+                    
+                }
+            } otherwise {
+                instr_push := 0
+            }
+            case2a := instr16b_unaligned
+            val pc_push = UInt(32 bits)
+            // In case 2b, use saved PC + 2; otherwise derive from FIFO
+            pc_push := instr16b_unaligned ? (savedPc + 2) | 
+                       (fetchFifo.io.pop.payload.pc.asUInt - (pc_unaligned ? U(2, 32 bits) | U(0, 32 bits)))
+
+            // case 2b: instruction comes from register, valid even when FIFO is stopped
+            up.valid    := fetchFifo.io.pop.valid || instr16b_unaligned
+            INSTRUCTION := instr_push
+            PC          := pc_push.asBits
+
+            when(flush) {
+                stop := False
+                instr16b_unaligned := False
+                instr32b_unaligned := False
+                pc_unaligned := False
+            }
+
+        } else new Area {
+            val canRequest = (fetchFifo.io.availability > 2) && RegNext(coreinit) && fetchFifo.io.push.ready 
+            instrMemory.instrReqValid := canRequest
+            when (canRequest ) {
+                instrMemory.Fetch(Iptr)
+            }
+            when(instrMemory.loadDone && canRequest) {
+                Iptr := Iptr + 4
+            }
+
+            fetchFifo.io.push.valid          := instrMemory.rdValid
+            fetchFifo.io.push.payload.inst   := instrMemory.rdInst
+            fetchFifo.io.push.payload.pc     := instrMemory.rdPc
+            fetchFifo.io.pop.ready := down.ready
+            fetchFifo.io.flush     := flush
+
+            up.valid    := fetchFifo.io.pop.valid
+            INSTRUCTION := fetchFifo.io.pop.payload.inst
+            PC          := fetchFifo.io.pop.payload.pc
         }
-        when(instrMemory.loadDone && canRequest) {
-            Iptr := Iptr + 4
-        }
 
-        fetchFifo.io.push.valid          := instrMemory.rdValid
-        fetchFifo.io.push.payload.inst   := instrMemory.rdInst
-        fetchFifo.io.push.payload.pc     := instrMemory.rdPc
 
-        fetchFifo.io.pop.ready := down.ready
-        fetchFifo.io.flush     := flush
-
-        up.valid    := fetchFifo.io.pop.valid
-        INSTRUCTION := fetchFifo.io.pop.payload.inst
-        PC          := fetchFifo.io.pop.payload.pc
        
     }
 
   val decoder = new decode.Area {
     
-    val instr      = INSTRUCTION.asBits.simPublic()
+    val instr      = Bits(32 bits).simPublic()
+    val rawInstr   = INSTRUCTION.asBits
+    instr := rawInstr
+    val cIs16      = if(config.hasCompressed) (rawInstr(1 downto 0) =/= B"11") else False
+    val cIllegal   = Bool
+
+   
+
+    if(config.hasCompressed){
+        val decompInstr = RVCDecomp(rawInstr)
+        cIllegal := cIs16 && (decompInstr === 0)
+        when(cIs16){
+            instr := decompInstr
+        }
+    } else {
+        cIllegal := False
+    }
+
+    val instrIsCompressed = Bool()
+    if(config.hasCompressed){
+        instrIsCompressed := cIs16
+    } else {
+        instrIsCompressed := False
+    }
+
     val pc         = PC.asBits.simPublic()
     val opcode      = instr(6 downto 0)
     val funct3      = instr(14 downto 12)
@@ -658,8 +974,8 @@ class RV (config: RVConfig) extends Component {
       val u_imm = S(instr(31 downto 12) ## B((11 downto 0) -> false))
 
 
-      val trap = Bool()
-      trap := (itype === InstrType.Undef) || (csr.regidx === CsrReg.ILLEGAL)
+    val trap = Bool()
+    trap := (itype === InstrType.Undef) || (csr.regidx === CsrReg.ILLEGAL) || cIllegal
 
     val rs1_valid =  ((iformat === InstrFormat.R) ||
                 (iformat === InstrFormat.I) ||
@@ -688,6 +1004,7 @@ class RV (config: RVConfig) extends Component {
       rd_addr_final :=  rd_valid ? rd_addr.asBits | B"00000"
     val RD_ADDR_FINAL = insert(rd_addr_final)
 
+    DECODED_INSTR := instr   // propagate decompressed instruction to execute
    
     val MUL_OP        = insert(mul_op)
 
@@ -726,6 +1043,7 @@ class RV (config: RVConfig) extends Component {
       val RS2_IMM = insert(rs2_imm)
 
       val ITYPE = insert(itype)
+    val IS_C = insert(instrIsCompressed)
     
       // register file
      // RegFile.rs1_rd      := rs1_valid
@@ -744,6 +1062,9 @@ class RV (config: RVConfig) extends Component {
        // when(isValid){
             rvfi.order      := rvfiOrder
             rvfi.insn       := instr
+            rvfi.insn_raw   := rawInstr
+            rvfi.insn_is_c  := instrIsCompressed
+            rvfi.insn_len   := instrIsCompressed ? U(2, 3 bits) | U(4, 3 bits)
             rvfi.trap       := trap
             rvfi.halt       := False
             rvfi.intr       := False
@@ -774,7 +1095,7 @@ class RV (config: RVConfig) extends Component {
     val funct3          = Bits(3 bits)
 
     itype           := ITYPE
-    instr           := INSTRUCTION
+    instr           := DECODED_INSTR
     funct3          := instr(14 downto 12)   
     val op1_33      = S(OP1_33)
     val op2_33      = S(OP2_33)
@@ -783,6 +1104,8 @@ class RV (config: RVConfig) extends Component {
     val op2         = op2_33(31 downto 0)
     val rs2         = RS2_IMM
     val imm         = S(rs2(20 downto 0))
+    val instrStep   = UInt(32 bits)
+    instrStep       := IS_C ? U(2, 32 bits) | U(4, 32 bits)
     val rd_addr     = RD_ADDR_FINAL
     val haltRequest = False
 
@@ -859,9 +1182,9 @@ class RV (config: RVConfig) extends Component {
         val pc_op1   = SInt(32 bits)
         pc          := PC.asUInt
         pc_op1      := S(pc)
-        val pc_plus4 = pc + 4
+        val pc_plusInc = pc + instrStep
         val rd_wr    = False
-        val rd_wdata = pc_plus4.resize(32)
+        val rd_wdata = pc_plusInc.resize(32)
         when (isValid) {
           switch(itype){
             is(InstrType.B){
@@ -894,7 +1217,7 @@ class RV (config: RVConfig) extends Component {
       }
         // Clear LSB for JALR ops
         pc_jump := (take_jump ? U(pc_op1 + imm)  |
-                                pc_plus4         ) & ~(U(clr_lsb).resize(32))
+                                                                pc_plusInc       ) & ~(U(clr_lsb).resize(32))
         when (take_jump) {
           Iptr := pc_jump
           flush := True
@@ -973,7 +1296,7 @@ class RV (config: RVConfig) extends Component {
         when(take_irq){
             irq_taken  := True
             irq_target := mtvec_base.asUInt
-            CsrRegs.mepc   := Iptr.asBits
+            CsrRegs.mepc   := nextTrapPc.asBits
             CsrRegs.mcause := irqCauseValue
             val irqMstatusNext = Bits(32 bits)
             irqMstatusNext := CsrRegs.mstatus
@@ -1010,12 +1333,20 @@ class RV (config: RVConfig) extends Component {
     when(irq.irq_taken){
         Iptr := irq.irq_target
         flush := True
+        nextTrapPc := irq.irq_target
     } elsewhen(irq.mret_taken){
         Iptr := irq.mret_target
         flush := True
+        nextTrapPc := irq.mret_target
     } elsewhen(jump.take_jump){
         Iptr := jump.pc_jump
         flush := True
+        nextTrapPc := jump.pc_jump
+    }
+
+    val execRetire = execute.isValid && !flush && !haltRequest && (!dataMemory.loadPending || dataMemory.readDone)
+    when(execRetire && !jump.take_jump){
+        nextTrapPc := pc + instrStep
     }
        
    
@@ -1171,6 +1502,9 @@ class RV (config: RVConfig) extends Component {
             io.rvfi.order     := rvfi.order
             io.rvfi.pc_rdata  := execPc
             io.rvfi.insn      := rvfi.insn
+            io.rvfi.insn_raw  := rvfi.insn_raw
+            io.rvfi.insn_is_c := rvfi.insn_is_c
+            io.rvfi.insn_len  := rvfi.insn_len
             io.rvfi.trap      := rvfi.trap
             io.rvfi.halt      := rvfi.halt
             io.rvfi.intr      := rvfi.intr
@@ -1206,7 +1540,7 @@ class RV (config: RVConfig) extends Component {
                 io.rvfi.pc_wdata  := jump.pc_jump.resize(32)
             }
             .otherwise{
-                io.rvfi.pc_wdata  := execPc + 4
+                io.rvfi.pc_wdata  := execPc + instrStep
             }
         }
 
@@ -1250,6 +1584,9 @@ class RV (config: RVConfig) extends Component {
             io.rvfi.order     := rvfiOrder
             io.rvfi.pc_rdata  := Iptr
             io.rvfi.insn      := B(BigInt("00000013", 16), 32 bits)
+            io.rvfi.insn_raw  := B(BigInt("00000013", 16), 32 bits)
+            io.rvfi.insn_is_c := False
+            io.rvfi.insn_len  := U(4, 3 bits)
             io.rvfi.trap      := True
             io.rvfi.halt      := False
             io.rvfi.intr      := True

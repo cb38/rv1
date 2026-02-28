@@ -15,6 +15,7 @@ TBDIR        := $(dir $(abspath $(TBEXEC)))
 INCDIR       ?= ../common
 MAX_CYCLES   ?= 100000
 TMP_PREFIX   ?= tmp/
+VCD_FILE     ?= $(TMP_PREFIX)$(APP)_run.vcd
 
 # Useless:
 override CCFLAGS += -Wl,--no-warn-rwx-segments
@@ -27,7 +28,7 @@ override CCFLAGS += -Wl,--no-warn-rwx-segments
 all: run
 
 run: $(TMP_PREFIX)$(APP).bin
-	$(TBEXEC) --bin $(TMP_PREFIX)$(APP).bin --vcd $(TMP_PREFIX)$(APP)_run.vcd --cycles $(MAX_CYCLES)
+	$(TBEXEC) --bin $(TMP_PREFIX)$(APP).bin $(if $(strip $(VCD_FILE)),--vcd $(VCD_FILE),) --cycles $(MAX_CYCLES)
 
 view: run
 	gtkwave $(TMP_PREFIX)$(APP)_run.vcd

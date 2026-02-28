@@ -101,6 +101,7 @@ object RVVerilog extends App {
  
   config.generateVerilog(new RV(config = RVConfig(supportFormal = false,
                                                  supportMulDiv = true,
+                                                 supportCompressed = true,
                                                  supportCsr = true,
                                                  bootVector = BigInt("80000040", 16)))).printPruned()
 }
