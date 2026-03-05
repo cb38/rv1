@@ -5,7 +5,7 @@
 #   make rv       - generate Verilog only
 #   make tb_build - build testbench only
 
-TESTS := mul_hw irq_csr compressed_c hellow
+TESTS := mul_hw irq_csr compressed_c hellow debug
 
 RV_ROOT    := ../..
 RV_GEN_CMD := sbt "runMain rv.RVVerilog"
@@ -15,6 +15,7 @@ EXPECT_mul_hw       := 0
 EXPECT_irq_csr      := 0
 EXPECT_compressed_c := 0
 EXPECT_hellow       := 123
+EXPECT_debug        := 0
 
 .PHONY: all rv tb_build run clean $(TESTS)
 

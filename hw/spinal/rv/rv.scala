@@ -67,6 +67,10 @@ object CsrReg extends SpinalEnum(binaryOneHot) {
     val MEPC       = newElement()
     val MCAUSE     = newElement()
     val MIP        = newElement()
+    val DCSR       = newElement()
+    val DPC        = newElement()
+    val DSCRATCH0  = newElement()
+    val DSCRATCH1  = newElement()
     val ILLEGAL    = newElement()
 }
 
@@ -106,11 +110,17 @@ case class RVFI() extends Bundle {
     val mem_wmask   = Bits(4 bits)
     val mem_rdata   = Bits(32 bits)
     val mem_wdata   = Bits(32 bits)
+    val csr_mstatus_rmask = Bits(32 bits)
     val csr_mstatus_wmask = Bits(32 bits)
+    val csr_mstatus_rdata = Bits(32 bits)
     val csr_mstatus_wdata = Bits(32 bits)
+    val csr_mepc_rmask    = Bits(32 bits)
     val csr_mepc_wmask    = Bits(32 bits)
+    val csr_mepc_rdata    = Bits(32 bits)
     val csr_mepc_wdata    = Bits(32 bits)
+    val csr_mcause_rmask  = Bits(32 bits)
     val csr_mcause_wmask  = Bits(32 bits)
+    val csr_mcause_rdata  = Bits(32 bits)
     val csr_mcause_wdata  = Bits(32 bits)
     val ixl         = Bits(2 bits)
     val mode        = Bits(2 bits)
@@ -138,11 +148,17 @@ case class RVFI() extends Bundle {
         mem_rdata init(0) addAttribute("keep")
         mem_wmask init(0) addAttribute("keep")
         mem_wdata init(0) addAttribute("keep")
+        csr_mstatus_rmask init(0) addAttribute("keep")
         csr_mstatus_wmask init(0) addAttribute("keep")
+        csr_mstatus_rdata init(0) addAttribute("keep")
         csr_mstatus_wdata init(0) addAttribute("keep")
+        csr_mepc_rmask    init(0) addAttribute("keep")
         csr_mepc_wmask    init(0) addAttribute("keep")
+        csr_mepc_rdata    init(0) addAttribute("keep")
         csr_mepc_wdata    init(0) addAttribute("keep")
+        csr_mcause_rmask  init(0) addAttribute("keep")
         csr_mcause_wmask  init(0) addAttribute("keep")
+        csr_mcause_rdata  init(0) addAttribute("keep")
         csr_mcause_wdata  init(0) addAttribute("keep")
         ixl       init(1) addAttribute("keep")
         mode      init(3) addAttribute("keep")
@@ -171,6 +187,7 @@ case class RVConfig(
                 supportCsr      : Boolean = false,
                 supportFormal   : Boolean = false,
                 supportFence    : Boolean = false,
+                supportDebug    : Boolean = false,
                 pcSize          : Int     = 32,
                 dataAddrSize    : Int     = 32,
                 bootVector      : BigInt  = BigInt(0)
@@ -180,6 +197,7 @@ case class RVConfig(
     def hasCompressed = supportCompressed
     def hasCsr      = supportCsr
     def hasFence    = supportFence
+    def hasDebug    = supportDebug
 
 
     def hasFormal   = supportFormal
@@ -393,27 +411,43 @@ class RV (config: RVConfig) extends Component {
     )).setName("data_axi")
     val irq       = in(Bool).setName("irq")
     val timer_irq = in(Bool).setName("timer_irq")
+
+    val debug = if(config.hasDebug) new Bundle {
+        val halt_req   = in Bool()
+        val resume_req = in Bool()
+        val halted     = out Bool()
+        val reg_addr   = in UInt(5 bits)
+        val reg_wdata  = in Bits(32 bits)
+        val reg_rdata  = out Bits(32 bits)
+        val reg_wr     = in Bool()
+        val csr_addr   = in UInt(12 bits)
+        val csr_wdata  = in Bits(32 bits)
+        val csr_rdata  = out Bits(32 bits)
+        val csr_wr     = in Bool()
+    }.setName("debug") else null
   }
 
 
   // general
     val Iptr = Reg(UInt(32 bits)) init(U(config.bootVector, 32 bits))
     val nextTrapPc = Reg(UInt(32 bits)) init(U(config.bootVector, 32 bits))
-  val flush = Bool()
-  val coreinit = RegInit(False)
+    val flush = Bool()
+    val coreinit = RegInit(False)
     coreinit := True  
-  val irqSyncStage0 = RegNext(io.irq).init(False)
-  val irqSync       = RegNext(irqSyncStage0).init(False)
+    val irqSyncStage0 = RegNext(io.irq).init(False)
+    val irqSync       = RegNext(irqSyncStage0).init(False)
     val timerIrqSyncStage0 = RegNext(io.timer_irq).init(False)
     val timerIrqSync       = RegNext(timerIrqSyncStage0).init(False)
+
+    val debugHalted = if(config.hasDebug) RegInit(False) else null
+    val debugMode   = if(config.hasDebug) RegInit(False) else null
   
-  //val isData = False
+
   
   // register file
   val RegFile =  new Area {
-   // val rs1_rd      = Bool
+
     val rs1_rd_addr = UInt(5 bits)
-   // val rs2_rd      = Bool
     val rs2_rd_addr = UInt(5 bits)
     val rs1_data    = Bits(32 bits)
     val rs2_data    = Bits(32 bits)
@@ -426,8 +460,8 @@ class RV (config: RVConfig) extends Component {
     val rs2 = Bits(32 bits)
     rs1 := RegMem.readAsync(rs1_rd_addr)
     rs2 := RegMem.readAsync(rs2_rd_addr)
-    rs1_data := Mux(rs1_rd_addr === 0, B(0, 32 bits), Mux(rs1_rd_addr === rd_wr_addr, rd_wr_data, rs1))
-    rs2_data := Mux(rs2_rd_addr === 0, B(0, 32 bits), Mux(rs2_rd_addr === rd_wr_addr, rd_wr_data, rs2))
+    rs1_data := Mux(rs1_rd_addr === 0, B(0, 32 bits), Mux(rd_wr && rs1_rd_addr === rd_wr_addr, rd_wr_data, rs1))
+    rs2_data := Mux(rs2_rd_addr === 0, B(0, 32 bits), Mux(rd_wr && rs2_rd_addr === rd_wr_addr, rd_wr_data, rs2))
     RegMem.write(rd_wr_addr, rd_wr_data, rd_wr)
   }
 
@@ -439,11 +473,65 @@ class RV (config: RVConfig) extends Component {
                 val mcause   = Reg(Bits(32 bits)) init(0)
                 val mie      = Reg(Bits(32 bits)) init(0)
                 val mip      = Reg(Bits(32 bits)) init(0)
+                val dcsr     = if(config.hasDebug) Reg(Bits(32 bits)) init(B(BigInt("40000003", 16), 32 bits)) else null
+                val dpc      = if(config.hasDebug) Reg(Bits(32 bits)) init(0) else null
+                val dscratch0 = if(config.hasDebug) Reg(Bits(32 bits)) init(0) else null
+                val dscratch1 = if(config.hasDebug) Reg(Bits(32 bits)) init(0) else null
         } else null
 
     if(config.hasCsr){
             CsrRegs.mip(11) := irqSync
             CsrRegs.mip(7)  := timerIrqSync
+    }
+
+    // Debug GPR/CSR access when halted
+    if(config.hasDebug) {
+        // GPR read (combinational)
+        io.debug.reg_rdata := Mux(io.debug.reg_addr === 0, B(0, 32 bits),
+                                  RegFile.RegMem.readAsync(io.debug.reg_addr))
+        // GPR write (when halted)
+        when(debugHalted && io.debug.reg_wr && io.debug.reg_addr =/= 0) {
+            RegFile.RegMem.write(io.debug.reg_addr, io.debug.reg_wdata)
+        }
+
+        // CSR read (combinational mux)
+        io.debug.csr_rdata := 0
+        if(config.hasCsr) {
+            switch(io.debug.csr_addr) {
+                is(U(0x300, 12 bits)) { io.debug.csr_rdata := CsrRegs.mstatus }
+                is(U(0x304, 12 bits)) { io.debug.csr_rdata := CsrRegs.mie }
+                is(U(0x305, 12 bits)) { io.debug.csr_rdata := CsrRegs.mtvec }
+                is(U(0x340, 12 bits)) { io.debug.csr_rdata := CsrRegs.mscratch }
+                is(U(0x341, 12 bits)) { io.debug.csr_rdata := CsrRegs.mepc }
+                is(U(0x342, 12 bits)) { io.debug.csr_rdata := CsrRegs.mcause }
+                is(U(0x344, 12 bits)) { io.debug.csr_rdata := CsrRegs.mip }
+                is(U(0x7B0, 12 bits)) { io.debug.csr_rdata := CsrRegs.dcsr }
+                is(U(0x7B1, 12 bits)) { io.debug.csr_rdata := CsrRegs.dpc }
+                is(U(0x7B2, 12 bits)) { io.debug.csr_rdata := CsrRegs.dscratch0 }
+                is(U(0x7B3, 12 bits)) { io.debug.csr_rdata := CsrRegs.dscratch1 }
+            }
+        }
+
+        // CSR write (when halted)
+        when(debugHalted && io.debug.csr_wr) {
+            if(config.hasCsr) {
+                switch(io.debug.csr_addr) {
+                    is(U(0x300, 12 bits)) { CsrRegs.mstatus  := io.debug.csr_wdata }
+                    is(U(0x304, 12 bits)) { CsrRegs.mie      := io.debug.csr_wdata }
+                    is(U(0x305, 12 bits)) { CsrRegs.mtvec    := io.debug.csr_wdata }
+                    is(U(0x340, 12 bits)) { CsrRegs.mscratch := io.debug.csr_wdata }
+                    is(U(0x341, 12 bits)) { CsrRegs.mepc     := io.debug.csr_wdata }
+                    is(U(0x342, 12 bits)) { CsrRegs.mcause   := io.debug.csr_wdata }
+                    is(U(0x344, 12 bits)) { /* MIP: MEIP(11) and MTIP(7) are read-only, managed by hardware */
+                        for(i <- 0 until 32 if i != 11 && i != 7) { CsrRegs.mip(i) := io.debug.csr_wdata(i) }
+                    }
+                    is(U(0x7B0, 12 bits)) { CsrRegs.dcsr     := io.debug.csr_wdata }
+                    is(U(0x7B1, 12 bits)) { CsrRegs.dpc      := io.debug.csr_wdata }
+                    is(U(0x7B2, 12 bits)) { CsrRegs.dscratch0 := io.debug.csr_wdata }
+                    is(U(0x7B3, 12 bits)) { CsrRegs.dscratch1 := io.debug.csr_wdata }
+                }
+            }
+        }
     }
   
  
@@ -564,12 +652,13 @@ class RV (config: RVConfig) extends Component {
             val case2a = Bool() 
             val stop = RegInit(False)
 
-            val canRequest = (fetchFifo.io.availability > 2) && RegNext(coreinit) && fetchFifo.io.push.ready && !stop 
+            val dbgHalt = if(config.hasDebug) (debugHalted || io.debug.halt_req) else False
+            val canRequest = (fetchFifo.io.availability > 2) && RegNext(coreinit) && fetchFifo.io.push.ready && !stop && !dbgHalt && instrMemory.pcFifo.io.push.ready
             instrMemory.instrReqValid := canRequest
             when (canRequest ) {
                 instrMemory.Fetch(Iptr)
             }
-            when(instrMemory.loadDone && canRequest) {
+            when(io.instr_axi.ar.fire) {
                 Iptr := Iptr + 4
             }
             // push to fifo from memory
@@ -613,6 +702,7 @@ class RV (config: RVConfig) extends Component {
                         pc_unaligned := True
                         instr32b_unaligned := False
                         instr16b_unaligned := True
+                        savedPc := fetchFifo.io.pop.payload.pc.asUInt
                         stop := True
                     }
                 } elsewhen (instr_lo_is_rvi && !instr16b_unaligned ) { // case 1
@@ -666,12 +756,13 @@ class RV (config: RVConfig) extends Component {
             }
 
         } else new Area {
-            val canRequest = (fetchFifo.io.availability > 2) && RegNext(coreinit) && fetchFifo.io.push.ready 
+            val dbgHalt = if(config.hasDebug) (debugHalted || io.debug.halt_req) else False
+            val canRequest = (fetchFifo.io.availability > 2) && RegNext(coreinit) && fetchFifo.io.push.ready && !dbgHalt && instrMemory.pcFifo.io.push.ready
             instrMemory.instrReqValid := canRequest
             when (canRequest ) {
                 instrMemory.Fetch(Iptr)
             }
-            when(instrMemory.loadDone && canRequest) {
+            when(io.instr_axi.ar.fire) {
                 Iptr := Iptr + 4
             }
 
@@ -690,7 +781,7 @@ class RV (config: RVConfig) extends Component {
        
     }
 
-  val decoder = new decode.Area {
+    val decoder = new decode.Area {
     
     val instr      = Bits(32 bits).simPublic()
     val rawInstr   = INSTRUCTION.asBits
@@ -930,6 +1021,7 @@ class RV (config: RVConfig) extends Component {
                     itype       := InstrType.CSR
                     iformat     := InstrFormat.CSR
                     csr.use_imm := funct3(2)
+                    csr.zimm    := instr(19 downto 15).asUInt
                     switch(funct3){
                         is(B"001", B"101"){
                             csr.cmd := CsrCmd.WRITE
@@ -953,6 +1045,12 @@ class RV (config: RVConfig) extends Component {
                         is(U(0x341, 12 bits)){ csr.regidx := CsrReg.MEPC }
                         is(U(0x342, 12 bits)){ csr.regidx := CsrReg.MCAUSE }
                         is(U(0x344, 12 bits)){ csr.regidx := CsrReg.MIP }
+                        if(config.hasDebug) {
+                            is(U(0x7B0, 12 bits)){ csr.regidx := CsrReg.DCSR }
+                            is(U(0x7B1, 12 bits)){ csr.regidx := CsrReg.DPC }
+                            is(U(0x7B2, 12 bits)){ csr.regidx := CsrReg.DSCRATCH0 }
+                            is(U(0x7B3, 12 bits)){ csr.regidx := CsrReg.DSCRATCH1 }
+                        }
                         default { csr.regidx := CsrReg.ILLEGAL }
                         }
                     
@@ -988,9 +1086,7 @@ class RV (config: RVConfig) extends Component {
                         (iformat === InstrFormat.S) ||
                         (iformat === InstrFormat.B)    ) && !trap
 
-      // trap is NOT included in this term because it would get up into the critical
-      // path inside Fetch. So illegal instructions will result in an incorrect RAW stall, but that's
-      // OK.
+      
       val rd_valid =   ((iformat === InstrFormat.R) ||
                         (iformat === InstrFormat.I) ||
                         (iformat === InstrFormat.U) ||
@@ -1044,6 +1140,7 @@ class RV (config: RVConfig) extends Component {
 
       val ITYPE = insert(itype)
     val IS_C = insert(instrIsCompressed)
+    val TRAP = insert(trap)
     
       // register file
      // RegFile.rs1_rd      := rs1_valid
@@ -1053,15 +1150,9 @@ class RV (config: RVConfig) extends Component {
 
      val formal = if (config.hasFormal) new Area {
 
-        when(isValid){
-            rvfiOrder := rvfiOrder + 1
-        }
-
-        rvfi.valid      := isValid
-        
        // when(isValid){
             rvfi.order      := rvfiOrder
-            rvfi.insn       := instr
+            rvfi.insn       := instrIsCompressed ? (B(0, 16 bits) ## rawInstr(15 downto 0)) | instr
             rvfi.insn_raw   := rawInstr
             rvfi.insn_is_c  := instrIsCompressed
             rvfi.insn_len   := instrIsCompressed ? U(2, 3 bits) | U(4, 3 bits)
@@ -1087,7 +1178,7 @@ class RV (config: RVConfig) extends Component {
   } // end decoder
 
 
-  val exec = new execute.Area {
+    val exec = new execute.Area {
 
     import decoder._
     val itype           = InstrType()
@@ -1107,7 +1198,7 @@ class RV (config: RVConfig) extends Component {
     val instrStep   = UInt(32 bits)
     instrStep       := IS_C ? U(2, 32 bits) | U(4, 32 bits)
     val rd_addr     = RD_ADDR_FINAL
-    val haltRequest = False
+    val haltRequest = if(config.hasDebug) debugHalted else False
 
     val pc = PC.asUInt.simPublic()
     val valid = Bool().simPublic()
@@ -1218,6 +1309,12 @@ class RV (config: RVConfig) extends Component {
         // Clear LSB for JALR ops
         pc_jump := (take_jump ? U(pc_op1 + imm)  |
                                                                 pc_plusInc       ) & ~(U(clr_lsb).resize(32))
+        // Do not write link register when JAL/JALR target is misaligned (trap)
+        // Exception: C.J/C.JAL specs don't check misalignment, so don't suppress for them
+        val jumpMisaligned = if(config.hasCompressed) pc_jump(0) else !(pc_jump(1 downto 0) === 0)
+        when(pc_jump_valid && jumpMisaligned && !(IS_C && itype === InstrType.JAL)) {
+          rd_wr := False
+        }
         when (take_jump) {
           Iptr := pc_jump
           flush := True
@@ -1239,11 +1336,15 @@ class RV (config: RVConfig) extends Component {
         
         val memRdData = Bits(32 bits)  
         memRdData := 0
-        // halt until memory operation is done
-        haltWhen(!dataMemory.readDone && itype === InstrType.L)
-        haltWhen(!dataMemory.writeDone && itype === InstrType.S)
+        val storeMisaligned = (size === B"01" && lsu_addr(0)) ||
+                              (size === B"10" && !(lsu_addr(1 downto 0) === 0))
+        val loadMisaligned  = (size === B"01" && lsu_addr(0)) ||
+                              (size === B"10" && !(lsu_addr(1 downto 0) === 0))
+        // halt until memory operation is done (but not for misaligned accesses - those trap immediately)
+        haltWhen(!dataMemory.readDone && itype === InstrType.L && !loadMisaligned)
+        haltWhen(!dataMemory.writeDone && itype === InstrType.S && !storeMisaligned)
 
-        when (itype === InstrType.S && valid) {   
+        when (itype === InstrType.S && valid && !storeMisaligned) {   
                   mem_wdata := size.mux[Bits](
                     B"00" -> rs2(7 downto 0) ## rs2(7 downto 0) ## rs2(7 downto 0) ## rs2(7 downto 0),
                     B"01" -> rs2(15 downto 0) ## rs2(15 downto 0),
@@ -1251,7 +1352,7 @@ class RV (config: RVConfig) extends Component {
                    dataMemory.WriteData(lsu_addr, mem_wdata, size)
    
         }
-        when (itype === InstrType.L && valid) {
+        when (itype === InstrType.L && valid && !loadMisaligned) {
            dataMemory.ReadData(lsu_addr)
            when (dataMemory.readDone === True) {
             rd_wr    := True  
@@ -1290,7 +1391,7 @@ class RV (config: RVConfig) extends Component {
         val timer_irq_pending = mie_mtie && mip_mtip
         val irq_pending = (ext_irq_pending || timer_irq_pending) && mstatus_mie
         val irqCauseValue = ext_irq_pending ? irqCauseExternal | irqCauseTimer
-        val take_irq    = irq_pending && !valid 
+        val take_irq    = irq_pending && !valid && !(if(config.hasDebug) debugHalted else False)
         val mtvec_base  = (CsrRegs.mtvec(31 downto 2) ## B"00")
         val isMret      = (itype === InstrType.E) && (instr(31 downto 20) === B"001100000010")
         when(take_irq){
@@ -1325,11 +1426,6 @@ class RV (config: RVConfig) extends Component {
         val mret_taken = False
         val mret_target = U(0, 32 bits)
     }
-    if(config.hasFormal && config.hasCsr){
-        when(irq.irq_taken){
-            rvfiOrder := rvfiOrder + 1
-        }
-    }
     when(irq.irq_taken){
         Iptr := irq.irq_target
         flush := True
@@ -1342,6 +1438,48 @@ class RV (config: RVConfig) extends Component {
         Iptr := jump.pc_jump
         flush := True
         nextTrapPc := jump.pc_jump
+    }
+
+    // Debug halt / resume / ebreak / dret
+    if(config.hasDebug) {
+        io.debug.halted := debugHalted
+
+        val isEbreak      = (itype === InstrType.E) && (instr(31 downto 20) === B"000000000001")
+        val isDret         = (itype === InstrType.E) && (instr === B(BigInt("7B200073", 16), 32 bits))
+        val ebreakToDebug  = isEbreak && valid && (debugMode || CsrRegs.dcsr(15))
+
+        // External halt request – wait for pipeline idle (!valid) for clean halt
+        when(io.debug.halt_req && !debugHalted && !valid) {
+            debugHalted := True
+            debugMode   := True
+            CsrRegs.dpc := nextTrapPc.asBits
+            CsrRegs.dcsr(8 downto 6) := B"011"  // cause = 3 (halt request)
+            flush := True
+        }
+
+        // ebreak enters debug mode when dcsr.ebreakm is set or already in debug mode
+        when(ebreakToDebug) {
+            debugHalted := True
+            debugMode   := True
+            CsrRegs.dpc := pc.asBits
+            CsrRegs.dcsr(8 downto 6) := B"001"  // cause = 1 (ebreak)
+            flush := True
+        }
+
+        // Resume request
+        when(io.debug.resume_req && debugHalted) {
+            debugHalted := False
+            debugMode   := False
+            Iptr := CsrRegs.dpc.asUInt
+            flush := True
+        }
+
+        // dret instruction (opcode 0x7B200073) exits debug mode
+        when(valid && isDret && debugMode) {
+            debugMode := False
+            Iptr := CsrRegs.dpc.asUInt
+            flush := True
+        }
     }
 
     val execRetire = execute.isValid && !flush && !haltRequest && (!dataMemory.loadPending || dataMemory.readDone)
@@ -1385,30 +1523,46 @@ class RV (config: RVConfig) extends Component {
             val rd_wdata   = U(0,32 bits)
             val result     = U(0, 32 bits)
           
-            switch(opSel){
-                is(MulOp.MUL){
-                    result := U(mul_ss(31 downto 0))
+            if (config.hasFormal) {
+                // RISCV_FORMAL_ALTOPS: replace real mul/div with simple XOR-based operations
+                val altops_add = U((op1 + op2).asBits)
+                val altops_sub = U((op1 - op2).asBits)
+                switch(opSel){
+                    is(MulOp.MUL)    { result := altops_add ^ U(BigInt("5876063e", 16), 32 bits) }
+                    is(MulOp.MULH)   { result := altops_add ^ U(BigInt("f6583fb7", 16), 32 bits) }
+                    is(MulOp.MULHSU) { result := altops_sub ^ U(BigInt("ecfbe137", 16), 32 bits) }
+                    is(MulOp.MULHU)  { result := altops_add ^ U(BigInt("949ce5e8", 16), 32 bits) }
+                    is(MulOp.DIV)    { result := altops_sub ^ U(BigInt("7f8529ec", 16), 32 bits) }
+                    is(MulOp.DIVU)   { result := altops_sub ^ U(BigInt("10e8fd70", 16), 32 bits) }
+                    is(MulOp.REM)    { result := altops_sub ^ U(BigInt("8da68fa5", 16), 32 bits) }
+                    is(MulOp.REMU)   { result := altops_sub ^ U(BigInt("3138d0e1", 16), 32 bits) }
                 }
-                is(MulOp.MULH){
-                    result := U(mul_ss(63 downto 32))
-                }
-                is(MulOp.MULHSU){
-                    result := U(mul_su(63 downto 32))
-                }
-                is(MulOp.MULHU){
-                    result := U(mul_uu(63 downto 32))
-                }
-                is(MulOp.DIV){
-                    result := U(divSignedRes)
-                }
-                is(MulOp.DIVU){
-                    result := U(divUnsignedRes)
-                }
-                is(MulOp.REM){
-                    result := U(remSignedRes)
-                }
-                is(MulOp.REMU){
-                    result := U(remUnsignedRes)
+            } else {
+                switch(opSel){
+                    is(MulOp.MUL){
+                        result := U(mul_ss(31 downto 0))
+                    }
+                    is(MulOp.MULH){
+                        result := U(mul_ss(63 downto 32))
+                    }
+                    is(MulOp.MULHSU){
+                        result := U(mul_su(63 downto 32))
+                    }
+                    is(MulOp.MULHU){
+                        result := U(mul_uu(63 downto 32))
+                    }
+                    is(MulOp.DIV){
+                        result := U(divSignedRes)
+                    }
+                    is(MulOp.DIVU){
+                        result := U(divUnsignedRes)
+                    }
+                    is(MulOp.REM){
+                        result := U(remSignedRes)
+                    }
+                    is(MulOp.REMU){
+                        result := U(remUnsignedRes)
+                    }
                 }
             }
             when(mulValid && (opSel =/= MulOp.NONE)){
@@ -1422,6 +1576,18 @@ class RV (config: RVConfig) extends Component {
         }
   
     
+    // CSR write details exposed for RVFI
+    val csrOpValid_rvfi   = if(config.hasFormal) Bool() else null
+    val csrWriteMask_rvfi = if(config.hasFormal) Bits(32 bits) else null
+    val csrWriteData_rvfi = if(config.hasFormal) Bits(32 bits) else null
+    val csrReadData_rvfi  = if(config.hasFormal) Bits(32 bits) else null
+    if(config.hasFormal) {
+        //csrOpValid_rvfi   := False
+        csrWriteMask_rvfi := B(0, 32 bits)
+        csrWriteData_rvfi := B(0, 32 bits)
+        csrReadData_rvfi  := B(0, 32 bits)
+    }
+
     val csr = if(config.hasCsr) new Area {
             
         val operand   = Bits(32 bits)
@@ -1436,6 +1602,12 @@ class RV (config: RVConfig) extends Component {
             is(CsrReg.MEPC)     { readData := CsrRegs.mepc }
             is(CsrReg.MCAUSE)   { readData := CsrRegs.mcause }
             is(CsrReg.MIP)      { readData := CsrRegs.mip }
+            if(config.hasDebug) {
+                is(CsrReg.DCSR)     { readData := CsrRegs.dcsr }
+                is(CsrReg.DPC)      { readData := CsrRegs.dpc }
+                is(CsrReg.DSCRATCH0){ readData := CsrRegs.dscratch0 }
+                is(CsrReg.DSCRATCH1){ readData := CsrRegs.dscratch1 }
+            }
         }
         val writeMask = Bits(32 bits)
         val writeData = Bits(32 bits)
@@ -1448,7 +1620,7 @@ class RV (config: RVConfig) extends Component {
             default              { writeData := readData; writeMask := B(0, 32 bits) }
         }
         
-        val csrOpValid = (itype === InstrType.CSR) && execute.isValid && !decoder.trap
+        val csrOpValid = (itype === InstrType.CSR) && execute.isValid && !decoder.TRAP
         val rd_wr       = False
         val rd_wdata    = U(0,32 bits)
         
@@ -1464,7 +1636,26 @@ class RV (config: RVConfig) extends Component {
                 is(CsrReg.MSCRATCH){ CsrRegs.mscratch := writeData }
                 is(CsrReg.MEPC)    { CsrRegs.mepc     := writeData }
                 is(CsrReg.MCAUSE)  { CsrRegs.mcause   := writeData }
-                is(CsrReg.MIP)    { CsrRegs.mip      := writeData }
+                is(CsrReg.MIP)    { /* MEIP(11) and MTIP(7) are read-only, managed by hardware */
+                    for(i <- 0 until 32 if i != 11 && i != 7) { CsrRegs.mip(i) := writeData(i) }
+                }
+                if(config.hasDebug) {
+                    is(CsrReg.DCSR)    { CsrRegs.dcsr     := writeData }
+                    is(CsrReg.DPC)     { CsrRegs.dpc      := writeData }
+                    is(CsrReg.DSCRATCH0){ CsrRegs.dscratch0 := writeData }
+                    is(CsrReg.DSCRATCH1){ CsrRegs.dscratch1 := writeData }
+                }
+            }
+        }
+        // Expose CSR write details for RVFI
+        if(config.hasFormal) {
+            csrOpValid_rvfi := csrOpValid && (CSR.cmd =/= CsrCmd.NONE)
+            when(csrOpValid && (CSR.cmd =/= CsrCmd.NONE)) {
+                csrWriteMask_rvfi := writeMask
+                csrWriteData_rvfi := writeData
+            }
+            when(csrOpValid) {
+                csrReadData_rvfi := readData
             }
         }
     } else new Area{
@@ -1491,7 +1682,7 @@ class RV (config: RVConfig) extends Component {
         
         val execPc = PC.asUInt.resize(32)
         
-        val rvfiRetire = execute.isValid && !flush && !haltRequest && (!dataMemory.loadPending || dataMemory.readDone)
+        val rvfiRetire = execute.isValid && !haltRequest && (itype =/= InstrType.L || dataMemory.readDone || lsu.loadMisaligned) && (itype =/= InstrType.S || dataMemory.writeDone || lsu.storeMisaligned)
 
         when(rvfiRetire){
             rvfiOrder := rvfiOrder + 1
@@ -1499,7 +1690,7 @@ class RV (config: RVConfig) extends Component {
 
         io.rvfi.valid := rvfiRetire
         when(isValid){
-            io.rvfi.order     := rvfi.order
+            io.rvfi.order     := rvfiOrder
             io.rvfi.pc_rdata  := execPc
             io.rvfi.insn      := rvfi.insn
             io.rvfi.insn_raw  := rvfi.insn_raw
@@ -1507,11 +1698,18 @@ class RV (config: RVConfig) extends Component {
             io.rvfi.insn_len  := rvfi.insn_len
             io.rvfi.trap      := rvfi.trap
             io.rvfi.halt      := rvfi.halt
+            if(config.hasDebug) {
+                // EBREAK entering debug halt: report halt=1 so liveness checker knows CPU stopped
+                val isEbreak_f = (itype === InstrType.E) && (instr(31 downto 20) === B"000000000001")
+                when(isEbreak_f && (debugMode || CsrRegs.dcsr(15))) {
+                    io.rvfi.halt := True
+                }
+            }
             io.rvfi.intr      := rvfi.intr
 
             io.rvfi.rs1_addr  := rvfi.rs1_addr
             io.rvfi.rs2_addr  := rvfi.rs2_addr
-            io.rvfi.rd_addr   := rvfi.rd_addr
+            io.rvfi.rd_addr   := rd_wr ? rvfi.rd_addr | U(0, 5 bits)
 
             io.rvfi.rs1_rdata := rvfi.rs1_rdata
             io.rvfi.rs2_rdata := rvfi.rs2_rdata
@@ -1524,15 +1722,62 @@ class RV (config: RVConfig) extends Component {
             io.rvfi.mem_rdata := 0
             io.rvfi.mem_wmask := 0
             io.rvfi.mem_wdata := 0
+            io.rvfi.csr_mstatus_rmask := 0
             io.rvfi.csr_mstatus_wmask := 0
+            io.rvfi.csr_mstatus_rdata := 0
             io.rvfi.csr_mstatus_wdata := 0
+            io.rvfi.csr_mepc_rmask    := 0
             io.rvfi.csr_mepc_wmask    := 0
+            io.rvfi.csr_mepc_rdata    := 0
             io.rvfi.csr_mepc_wdata    := 0
+            io.rvfi.csr_mcause_rmask  := 0
             io.rvfi.csr_mcause_wmask  := 0
+            io.rvfi.csr_mcause_rdata  := 0
             io.rvfi.csr_mcause_wdata  := 0
            
             io.rvfi.ixl      := 1
             io.rvfi.mode     := 3
+        }
+
+        // CSR write tracking for CSR instructions
+        if(config.hasCsr) {
+            when(csrOpValid_rvfi) {
+                switch(CSR.regidx) {
+                    is(CsrReg.MSTATUS) {
+                        io.rvfi.csr_mstatus_rmask := B(BigInt("FFFFFFFF", 16), 32 bits)
+                        io.rvfi.csr_mstatus_rdata := csrReadData_rvfi
+                        io.rvfi.csr_mstatus_wmask := csrWriteMask_rvfi
+                        io.rvfi.csr_mstatus_wdata := csrWriteData_rvfi
+                    }
+                    is(CsrReg.MEPC) {
+                        io.rvfi.csr_mepc_rmask := B(BigInt("FFFFFFFF", 16), 32 bits)
+                        io.rvfi.csr_mepc_rdata := csrReadData_rvfi
+                        io.rvfi.csr_mepc_wmask := csrWriteMask_rvfi
+                        io.rvfi.csr_mepc_wdata := csrWriteData_rvfi
+                    }
+                    is(CsrReg.MCAUSE) {
+                        io.rvfi.csr_mcause_rmask := B(BigInt("FFFFFFFF", 16), 32 bits)
+                        io.rvfi.csr_mcause_rdata := csrReadData_rvfi
+                        io.rvfi.csr_mcause_wmask := csrWriteMask_rvfi
+                        io.rvfi.csr_mcause_wdata := csrWriteData_rvfi
+                    }
+                }
+            }
+            // mret modifies mstatus
+            when(irq.mret_taken) {
+                val mretMstatus = Bits(32 bits)
+                mretMstatus := CsrRegs.mstatus
+                mretMstatus(3) := CsrRegs.mstatus(7)
+                mretMstatus(7) := True
+                mretMstatus(12 downto 11) := B"00"
+                io.rvfi.csr_mstatus_rmask := B(BigInt("FFFFFFFF", 16), 32 bits)
+                io.rvfi.csr_mstatus_rdata := CsrRegs.mstatus
+                io.rvfi.csr_mstatus_wmask := B(BigInt("FFFFFFFF", 16), 32 bits)
+                io.rvfi.csr_mstatus_wdata := mretMstatus
+                // mret reads mepc
+                io.rvfi.csr_mepc_rmask := B(BigInt("FFFFFFFF", 16), 32 bits)
+                io.rvfi.csr_mepc_rdata := CsrRegs.mepc
+            }
         }
     
         when(isValid){
@@ -1544,47 +1789,73 @@ class RV (config: RVConfig) extends Component {
             }
         }
 
+        // pc_wdata overrides for mret, ebreak, dret
+        if(config.hasCsr) {
+            when(irq.mret_taken) {
+                io.rvfi.pc_wdata := irq.mret_target
+            }
+        }
+        if(config.hasDebug) {
+            val isEbreak_f      = (itype === InstrType.E) && (instr(31 downto 20) === B"000000000001")
+            val ebreakToDebug_f = isEbreak_f && valid && (debugMode || CsrRegs.dcsr(15))
+            val isDret_f        = (itype === InstrType.E) && (instr === B(BigInt("7B200073", 16), 32 bits))
+            when(ebreakToDebug_f) {
+                io.rvfi.pc_wdata := execPc   // ebreak halts at current PC
+            }
+            when(valid && isDret_f && debugMode) {
+                io.rvfi.pc_wdata := CsrRegs.dpc.asUInt
+            }
+        }
+
         switch(itype){
             is(InstrType.B, InstrType.JAL, InstrType.JALR){
-                when(isValid && jump.pc_jump_valid && !(jump.pc_jump(1 downto 0) === 0)){
+                val misaligned = if(config.hasCompressed) jump.pc_jump(0) else !(jump.pc_jump(1 downto 0) === 0)
+                // C.J/C.JAL specs don't check misalignment; all other jump/branch specs do
+                when(isValid && jump.pc_jump_valid && misaligned && !(IS_C && itype === InstrType.JAL)){
                     io.rvfi.trap := True
                 }
             }
             is(InstrType.L){
                 when(isValid ){
                    val size     = B(funct3(1 downto 0))
-                    io.rvfi.mem_addr  := lsu.lsu_addr(31 downto 2) @@ U"00"
-                    io.rvfi.mem_rmask := ((size === B"00") ? B"0001" |  ((size === B"01") ? B"0011" |  B"1111")) |<< lsu.lsu_addr(1 downto 0)
-
-                    when(dataMemory.readDone){
-                        io.rvfi.mem_rdata := lsu.memRdData
-                    }
-                    io.rvfi.trap      := (size === B"01" && lsu.lsu_addr(0)) |
+                    val misaligned = (size === B"01" && lsu.lsu_addr(0)) |
                                       (size === B"10" && !(lsu.lsu_addr(1 downto 0) === 0))
+                    io.rvfi.trap      := misaligned
+                    when(!misaligned) {
+                        io.rvfi.mem_addr  := lsu.lsu_addr(31 downto 2) @@ U"00"
+                        io.rvfi.mem_rmask := ((size === B"00") ? B"0001" |  ((size === B"01") ? B"0011" |  B"1111")) |<< lsu.lsu_addr(1 downto 0)
+
+                        when(dataMemory.readDone){
+                            io.rvfi.mem_rdata := lsu.memRdData
+                        }
+                    }
                 }
             }
             is(InstrType.S){
                 when(isValid ){
                    val size     = B(funct3(1 downto 0))
-                    io.rvfi.mem_addr  := lsu.lsu_addr(31 downto 2) @@ U"00"
-                    io.rvfi.mem_wmask := ((size === B"00") ? B"0001" |
-                                      ((size === B"01") ? B"0011" |
-                                                                      B"1111")) |<< lsu.lsu_addr(1 downto 0)
-
-                    io.rvfi.mem_wdata := lsu.mem_wdata
-
-                    io.rvfi.trap      := (size === B"01" && lsu.lsu_addr(0)) |
+                    val misaligned = (size === B"01" && lsu.lsu_addr(0)) |
                                       (size === B"10" && !(lsu.lsu_addr(1 downto 0) === 0))
+                    io.rvfi.trap      := misaligned
+                    when(!misaligned) {
+                        io.rvfi.mem_addr  := lsu.lsu_addr(31 downto 2) @@ U"00"
+                        io.rvfi.mem_wmask := ((size === B"00") ? B"0001" |
+                                          ((size === B"01") ? B"0011" |
+                                                                          B"1111")) |<< lsu.lsu_addr(1 downto 0)
 
+                        io.rvfi.mem_wdata := lsu.mem_wdata
+                    }
                 }
             }
         }
 
         when(irq.irq_taken){
+            io.rvfi.valid     := True
+            rvfiOrder         := rvfiOrder + 1
             io.rvfi.order     := rvfiOrder
             io.rvfi.pc_rdata  := Iptr
-            io.rvfi.insn      := B(BigInt("00000013", 16), 32 bits)
-            io.rvfi.insn_raw  := B(BigInt("00000013", 16), 32 bits)
+            io.rvfi.insn      := B(0, 32 bits)
+            io.rvfi.insn_raw  := B(0, 32 bits)
             io.rvfi.insn_is_c := False
             io.rvfi.insn_len  := U(4, 3 bits)
             io.rvfi.trap      := True
@@ -1603,6 +1874,26 @@ class RV (config: RVConfig) extends Component {
             io.rvfi.mem_wdata := 0
             io.rvfi.pc_wdata  := irq.irq_target
 
+            // IRQ writes mepc, mcause, mstatus
+            val irqMstatus = Bits(32 bits)
+            irqMstatus := CsrRegs.mstatus
+            irqMstatus(7) := CsrRegs.mstatus(3)
+            irqMstatus(3) := False
+            irqMstatus(12 downto 11) := B"11"
+            io.rvfi.csr_mstatus_rmask := B(BigInt("FFFFFFFF", 16), 32 bits)
+            io.rvfi.csr_mstatus_rdata := CsrRegs.mstatus
+            io.rvfi.csr_mstatus_wmask := B(BigInt("FFFFFFFF", 16), 32 bits)
+            io.rvfi.csr_mstatus_wdata := irqMstatus
+            io.rvfi.csr_mepc_rmask    := B(BigInt("FFFFFFFF", 16), 32 bits)
+            io.rvfi.csr_mepc_rdata    := CsrRegs.mepc
+            io.rvfi.csr_mepc_wmask    := B(BigInt("FFFFFFFF", 16), 32 bits)
+            io.rvfi.csr_mepc_wdata    := nextTrapPc.asBits
+            io.rvfi.csr_mcause_rmask  := B(BigInt("FFFFFFFF", 16), 32 bits)
+            io.rvfi.csr_mcause_rdata  := CsrRegs.mcause
+            io.rvfi.csr_mcause_wmask  := B(BigInt("FFFFFFFF", 16), 32 bits)
+            val irqIsExternal = CsrRegs.mie(11) && CsrRegs.mip(11)
+            io.rvfi.csr_mcause_wdata  := irqIsExternal ? B(BigInt("8000000B", 16), 32 bits) | B(BigInt("80000007", 16), 32 bits)
+
             io.rvfi.ixl      := 1
             io.rvfi.mode     := 3
         }
@@ -1612,5 +1903,6 @@ class RV (config: RVConfig) extends Component {
     // pipeline
   Builder(fetch, decode, execute, f2d, d2e)
   io.IO := 1
+ 
 }
 

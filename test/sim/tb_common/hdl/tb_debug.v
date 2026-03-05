@@ -1,4 +1,5 @@
-// Testbench wrapper for RV core with AXI memory interfaces
+// Testbench wrapper for RV core + DebugModule
+// Exposes DMI bus at top level for CXXRTL testbench to drive
 
 `default_nettype none
 
@@ -16,6 +17,14 @@ module tb #(
 	input  wire               tms,
 	input  wire               tdi,
 	output wire               tdo,
+
+	// DMI bus (directly driven by testbench)
+	input  wire               dmi_req_valid,
+	input  wire [6:0]         dmi_req_addr,
+	input  wire [31:0]        dmi_req_data,
+	input  wire [1:0]         dmi_req_op,
+	output wire               dmi_resp_valid,
+	output wire [31:0]        dmi_resp_data,
 
 	// Instruction AXI-Lite interface
 	output wire               i_axi_ar_valid,
@@ -55,6 +64,43 @@ module tb #(
 );
 
 assign tdo = 1'b0; // JTAG not connected
+
+// Wires between DebugModule and RV core
+wire        dbg_halt_req;
+wire        dbg_resume_req;
+wire        dbg_halted;
+wire [4:0]  dbg_reg_addr;
+wire [31:0] dbg_reg_wdata;
+wire [31:0] dbg_reg_rdata;
+wire        dbg_reg_wr;
+wire [11:0] dbg_csr_addr;
+wire [31:0] dbg_csr_wdata;
+wire [31:0] dbg_csr_rdata;
+wire        dbg_csr_wr;
+
+DebugModule dm (
+	.io_dmi_req_valid           (dmi_req_valid),
+	.io_dmi_req_addr            (dmi_req_addr),
+	.io_dmi_req_data            (dmi_req_data),
+	.io_dmi_req_op              (dmi_req_op),
+	.io_dmi_resp_valid          (dmi_resp_valid),
+	.io_dmi_resp_data           (dmi_resp_data),
+
+	.io_core_halt_req           (dbg_halt_req),
+	.io_core_resume_req         (dbg_resume_req),
+	.io_core_halted             (dbg_halted),
+	.io_core_reg_addr           (dbg_reg_addr),
+	.io_core_reg_wdata          (dbg_reg_wdata),
+	.io_core_reg_rdata          (dbg_reg_rdata),
+	.io_core_reg_wr             (dbg_reg_wr),
+	.io_core_csr_addr           (dbg_csr_addr),
+	.io_core_csr_wdata          (dbg_csr_wdata),
+	.io_core_csr_rdata          (dbg_csr_rdata),
+	.io_core_csr_wr             (dbg_csr_wr),
+
+	.clk                        (clk),
+	.reset                      (~rst_n)
+);
 
 RV cpu (
 	.io_IO                      (/* open */),
@@ -119,22 +165,21 @@ RV cpu (
 	.data_axi_r_payload_data    (d_axi_r_data),
 	.data_axi_r_payload_resp    (d_axi_r_resp),
 	
+	// Debug port - connected to DebugModule
+	.debug_halt_req             (dbg_halt_req),
+	.debug_resume_req           (dbg_resume_req),
+	.debug_halted               (dbg_halted),
+	.debug_reg_addr             (dbg_reg_addr),
+	.debug_reg_wdata            (dbg_reg_wdata),
+	.debug_reg_rdata            (dbg_reg_rdata),
+	.debug_reg_wr               (dbg_reg_wr),
+	.debug_csr_addr             (dbg_csr_addr),
+	.debug_csr_wdata            (dbg_csr_wdata),
+	.debug_csr_rdata            (dbg_csr_rdata),
+	.debug_csr_wr               (dbg_csr_wr),
+
 	.irq                        (irq),
 	.timer_irq                  (timer_irq[0]),
-
-	// Debug port (active-low tie-offs for non-debug tests)
-	.debug_halt_req             (1'b0),
-	.debug_resume_req           (1'b0),
-	.debug_halted               (/* open */),
-	.debug_reg_addr             (5'b0),
-	.debug_reg_wdata            (32'b0),
-	.debug_reg_rdata            (/* open */),
-	.debug_reg_wr               (1'b0),
-	.debug_csr_addr             (12'b0),
-	.debug_csr_wdata            (32'b0),
-	.debug_csr_rdata            (/* open */),
-	.debug_csr_wr               (1'b0),
-
 	.clk                        (clk),
 	.reset                      (~rst_n)
 );

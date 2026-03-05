@@ -103,7 +103,22 @@ object RVVerilog extends App {
                                                  supportMulDiv = true,
                                                  supportCompressed = true,
                                                  supportCsr = true,
+                                                 supportDebug = true,
                                                  bootVector = BigInt("80000040", 16)))).printPruned()
+  config.generateVerilog(new DebugModule).printPruned()
+  config.generateVerilog(new JtagDTM).printPruned()
+}
+
+// Formal verification target with ALTOPS (replaces real mul/div with XOR-based ops)
+object RVFormalVerilog extends App {
+  val config=SpinalConfig(device=Device.XILINX,targetDirectory = "hw/gen",mergeAsyncProcess = true)
+ 
+  config.generateVerilog(new RV(config = RVConfig(supportFormal = true,
+                                                 supportMulDiv = true,
+                                                 supportCompressed = true,
+                                                 supportCsr = true,
+                                                 supportDebug = true,
+                                                 bootVector = BigInt("80000040", 16))).setDefinitionName("RV_formal")).printPruned()
 }
 
 // top soc exmaple to test the RV core with AXI4-Lite memory and GPIO
