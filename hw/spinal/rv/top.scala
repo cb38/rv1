@@ -102,7 +102,7 @@ object RVVerilog extends App {
   config.generateVerilog(new RV(config = RVConfig(supportFormal = false,
                                                  supportMulDiv = true,
                                                  supportCompressed = true,
-                                                 supportCsr = true,
+
                                                  supportDebug = true,
                                                  bootVector = BigInt("80000040", 16)))).printPruned()
   config.generateVerilog(new DebugModule).printPruned()
@@ -116,7 +116,6 @@ object RVFormalVerilog extends App {
   config.generateVerilog(new RV(config = RVConfig(supportFormal = true,
                                                  supportMulDiv = true,
                                                  supportCompressed = true,
-                                                 supportCsr = true,
                                                  supportDebug = true,
                                                  bootVector = BigInt("80000040", 16))).setDefinitionName("RV_formal")).printPruned()
 }
@@ -200,7 +199,6 @@ object RVTopVerilog extends App {
  
   config.generateVerilog(new RVTop(config = RVConfig(supportFormal = false,
                                                  supportMulDiv = false,
-                                                 supportCsr = false,
                                                  pcSize = 16,
                                                  dataAddrSize = 16,
                                                  bootVector = BigInt("00000000", 16))))
@@ -215,7 +213,6 @@ object RVSim extends App {
 
    SimConfig.withFstWave.compile(new RVTop(config = RVConfig(supportFormal = true,
                                                  supportMulDiv = false,
-                                                 supportCsr = false,
                                                  pcSize = 32,
                                                  dataAddrSize = 32,
                                                  bootVector = BigInt("80000000", 16)) )).doSim(seed = 2){ dut =>
