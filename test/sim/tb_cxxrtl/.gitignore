@@ -1,6 +1,6 @@
-tb
 tb-*
-tb_*
+tb_debug
+tb_rv
 dut.cpp
 build-*
 

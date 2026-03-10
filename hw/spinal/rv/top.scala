@@ -7,93 +7,15 @@ import spinal.sim._
 import spinal.core.sim._
 import spinal.lib.misc.pipeline._
 import scala.io.Source
+import scala.sys.process._
+import java.io.File
+import java.nio.file.{Files, Paths}
 import multiport_memory._
 
 
 
 
-////////////////////////////////////////////////
-object Assembler {
 
-  val prog = Array[Int]()
-
-  // collect destination addresses in first pass
-  val symbols = collection.mutable.Map[String, Int]()
-
-  def getProgram(prog: String) = assemble(prog)
-
-  def assemble(prog: String): Array[Int] = {
-    assemble(prog, false)
-    assemble(prog, true)
-  }
-
-  def assemble(prog: String, pass2: Boolean): Array[Int] = {
-
-    val source = Source.fromFile(prog)
-    var program = List[Int]()
-    var pc = 0
-
-    def toInt(s: String): Int = {
-      if (s.startsWith("0x")) {
-        Integer.parseInt(s.substring(2), 16)
-      } else {
-        Integer.parseInt(s)
-      }
-    }
-
-    def regNumber(s: String): Int = {
-      assert(s.startsWith("r"))
-      s.substring(1).toInt
-    }
-    for (line <- source.getLines()) {
-      
-      val tokens = line.trim.split(" ")
-      val Pattern = "(.*:)".r
-      val instruction = tokens(0) match {
-        case "#" => // comment
-        case Pattern(l) => if (!pass2) symbols += (l.substring(0, l.length - 1) -> pc)
-        case "add"    =>   regNumber(tokens(3)) << 20 | regNumber(tokens(2)) << 15 | regNumber(tokens(1)) << 7 | 0x33
-        case "sub"    =>   0x20 << 25 | regNumber(tokens(3)) << 20 | regNumber(tokens(2)) << 15 | regNumber(tokens(1)) << 7 | 0x33     
-        case "addi"   =>   toInt(tokens(3)) << 20 | regNumber(tokens(2)) << 15 | regNumber(tokens(1)) << 7 | 0x13
-        case "lui"    =>   toInt(tokens(2)) << 12 | regNumber(tokens(1)) << 7  | 0x37
-        case "jal"    =>   toInt(tokens(2)) << 20 | regNumber(tokens(1)) << 7  | 0x6f
-        case "lw"     =>   regNumber(tokens(3)) << 15 | toInt(tokens(2)) << 20 | 0x2 <<12 | regNumber(tokens(1)) << 7 | 0x03
-        case "sw"     =>   regNumber(tokens(3)) << 15 | toInt(tokens(2)) << 7  | 0x2 <<12 | regNumber(tokens(1)) << 20 | 0x23
-        case "lhu"    =>   regNumber(tokens(3)) << 15 | toInt(tokens(2)) << 20  | 0x5 <<12 | regNumber(tokens(1)) << 7 | 0x03
-        case "lb"     =>   regNumber(tokens(3)) << 15 | toInt(tokens(2)) << 20  | 0x0 <<12 | regNumber(tokens(1)) << 7 | 0x03
-        case "lbu"    =>   regNumber(tokens(3)) << 15 | toInt(tokens(2)) << 20  | 0x4 <<12 | regNumber(tokens(1)) << 7 | 0x03
-        case "sb"     =>   regNumber(tokens(3)) << 15 | toInt(tokens(2)) << 7  | 0x0 <<12 | regNumber(tokens(1)) << 20 | 0x23
-        case "" => // println("Empty line")
-        case t: String => throw new Exception("Assembler error: unknown instruction")
-        case _ => throw new Exception("Assembler error")
-      }
-      // print in hex
-      if (!pass2) println(line, (instruction match {
-        case (a: Int) => f"0x$a%08x"
-        case _ => "----"
-      }))
-     
-
-      instruction match {
-        
-        case (a: Int) => {
-          
-            program = a :: program
-            pc += 1
-          
-        }
-        case _ => // println("Something else")
-      }
-    }
-    val finalProg = program.reverse.toArray
-    if (!pass2) {
-      println(s"The program:")
-      finalProg.foreach(printf("0x%04x ", _))
-      println()
-    }
-    finalProg
-  }
-}
 
 
 object RVVerilog extends App {
@@ -144,7 +66,7 @@ class RVTop(config: RVConfig) extends Component {
 
         val instrMem = new AXI4LiteReadOnly_Mem(
             AxiLite4Config(
-                addressWidth = config.pcSize,
+                addressWidth = config.InstAddrSize,
                 dataWidth    = 32
             ),
             cfg
@@ -159,8 +81,14 @@ class RVTop(config: RVConfig) extends Component {
         )
         rv.io.instr_axi <> instrMem.io.axi
         rv.io.data_axi  <> dataMem.io.axi
+
+        // CLINT on periph_axi port (address decode done inside CPU)
+        val clint = new CLINT(config.dataAddrSize)
+        rv.io.periph_axi <> clint.io.bus
+
         rv.io.irq       := io.irq
-        rv.io.timer_irq := io.timer_irq
+        rv.io.timer_irq := clint.io.timerIrq || io.timer_irq
+        rv.io.soft_irq  := clint.io.softIrq
 
         val awSeen = RegInit(False)
         val wSeen  = RegInit(False)
@@ -199,33 +127,61 @@ object RVTopVerilog extends App {
  
   config.generateVerilog(new RVTop(config = RVConfig(supportFormal = false,
                                                  supportMulDiv = false,
-                                                 pcSize = 16,
+                                                 InstAddrSize = 16,
                                                  dataAddrSize = 16,
                                                  bootVector = BigInt("00000000", 16))))
 }
 
 object RVSim extends App {
-  
-     val program = Assembler.assemble("asm/RV.asm")
-   
-     
 
+  // Assemble and link test/sim/base/main.S
+  val baseDir = "test/sim/base"
+  val tmpDir  = s"$baseDir/tmp"
+  new File(tmpDir).mkdirs()
+  val ccFlags  = "-march=rv32i -mabi=ilp32 -Os -ffreestanding -nostdlib -nostartfiles -Wl,--no-warn-rwx-segments"
+  val ldScript = s"$baseDir/memmap_rv.ld"
+  val elfFile  = s"$tmpDir/main.elf"
+  val binFile  = s"$tmpDir/main.bin"
+
+  val rc1 = s"riscv32-unknown-elf-gcc $ccFlags $baseDir/main.S -T $ldScript -o $elfFile".!
+  require(rc1 == 0, s"Assembly failed with exit code $rc1")
+  val rc2 = s"riscv32-unknown-elf-objcopy -O binary $elfFile $binFile".!
+  require(rc2 == 0, s"objcopy failed with exit code $rc2")
+
+  // Load binary as array of 32-bit words (little-endian)
+  val binBytes = Files.readAllBytes(Paths.get(binFile))
+  val nWords   = (binBytes.length + 3) / 4
+  val program  = new Array[BigInt](nWords)
+  for (i <- 0 until nWords) {
+    var word = BigInt(0)
+    for (b <- 0 until 4) {
+      val idx = i * 4 + b
+      val byteVal = if (idx < binBytes.length) (binBytes(idx).toInt & 0xFF) else 0
+      word |= BigInt(byteVal) << (b * 8)
+    }
+    program(i) = word
+  }
+  println(s"Loaded $nWords words from $binFile (${binBytes.length} bytes)")
+   
 
    SimConfig.withFstWave.compile(new RVTop(config = RVConfig(supportFormal = true,
                                                  supportMulDiv = false,
-                                                 pcSize = 32,
+                                                 InstAddrSize = 32,
                                                  dataAddrSize = 32,
-                                                 bootVector = BigInt("80000000", 16)) )).doSim(seed = 2){ dut =>
+                                                 bootVector = BigInt("80000040", 16)) )).doSim{ dut =>
   val instrMem = dut.core.instrMem.mem.u_mem
   val dataMem  = dut.core.dataMem.mem.u_mem
-   for (i <- 0 until program.length) {
-            instrMem.setBigInt(i, program(i))
-            dataMem.setBigInt(i, program(i))
-        }
-  // fill the rest of memory with 0
-  for (i <- program.length until 1024) {
+  // Binary starts at _start (0x80000040), which maps to word offset 16 in memory
+  val memOffset = 16
+  // Clear all memory first
+  for (i <- 0 until 1024) {
             instrMem.setBigInt(i, 0)
             dataMem.setBigInt(i, 0)
+        }
+  // Load program at correct offset
+  for (i <- 0 until program.length) {
+            instrMem.setBigInt(memOffset + i, program(i))
+            dataMem.setBigInt(memOffset + i, program(i))
         }
   dut.clockDomain.forkStimulus(10)
   dut.io.irq #= false
@@ -237,7 +193,7 @@ object RVSim extends App {
     println()
   }
   // run simulation and stop when instruction is 0
-   while(run>0 && (dut.core.rv.exec.instr.toBigInt != 0 ||  (dut.core.rv.decoder.pc.toBigInt & 0xFFFFFF) < 16)) {
+   while(run>0 && (dut.core.rv.exec.instr.toBigInt != 0 ||  (dut.core.rv.decoder.pc.toBigInt & 0xFFFF) < 128)) {
         dut.clockDomain.waitSampling(1)
         run -= 1
         if (dut.core.rv.exec.valid.toBoolean)  {
@@ -257,12 +213,12 @@ object RVSim extends App {
   }
   // read value from memory
     println("value of memory at the  end of simu")
-    for (j <- 14 until 32 by 2) {
+    for (j <- 32 until 60 by 2) {
         printf("mem[%02d]:  %08X   mem[%02d]:  %08X ", j,dataMem.getBigInt(j),j+1,dataMem.getBigInt(j+1))
         println()  
     }
-        // check r1 is 0 and r4 is the address of the jal then test passed
-    if(dut.core.rv.RegFile.RegMem.getBigInt(1) == 0 && (dut.core.rv.RegFile.RegMem.getBigInt(4) & 0xFFFFF) == 0x34){
+        // check x1 is 0
+    if((dut.core.rv.RegFile.RegMem.getBigInt(1) & 0xFFFFF) == 0){
         println("Test passed!")
     } else {
         println("Test failed!") 

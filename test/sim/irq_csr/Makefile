@@ -1,7 +1,7 @@
 SRCS       := ../common/init_rv.S src/main.c
 APP        := irq_csr
 CCFLAGS    := -march=rv32im_zicsr -mabi=ilp32 -Os -ffreestanding -nostdlib -nostartfiles
-LDSCRIPT   := memmap_rv.ld
+LDSCRIPT   := ../common/memmap_rv.ld
 TBEXEC     := ../tb_cxxrtl/tb_rv
 MAX_CYCLES := 300000
 TB_MAKEFILE ?= Makefile

@@ -57,6 +57,29 @@ main:
     .option pop
     bne a0, s1, fail6
 
+    # Test: branch to compressed instruction at addr%4==2.
+    # The CPU bug: after branch to addr%4==2, the RVC decoder
+    # starts from lo halfword (addr-2) instead of hi halfword (addr).
+    # This inserts a phantom instruction from addr-2 before the target.
+    #
+    # We place c.addi a6,-1 at addr%4==0 (the "wrong" instruction)
+    # and c.addi a6,5 at addr%4==2 (the real target).
+    # If correct: a6 = 10 + 5 = 15
+    # If bug: a6 = 10 + (-1) + 5 = 14 (phantom c.addi a6,-1 executed)
+    li a6, 10            # a6 = 10
+    .option push
+    .option norvc
+    j 1f                 # 32-bit jump to 1f (at addr%4==2)
+    .option pop
+    .balign 4
+    .option push
+    .option rvc
+    c.addi a6, -1        # POISON at addr%4==0 — should NOT be executed
+1:  c.addi a6, 5         # TARGET at addr%4==2 — should be executed
+    .option pop
+    li t0, 15
+    bne a6, t0, fail7    # fail if a6 != 15
+
 pass:
     li a0, 0
     lw s1, 8(sp)
@@ -81,6 +104,9 @@ fail5:
     j done
 fail6:
     li a0, 6
+    j done
+fail7:
+    li a0, 7
 
 done:
     lw s1, 8(sp)

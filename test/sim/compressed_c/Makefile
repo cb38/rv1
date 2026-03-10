@@ -1,7 +1,7 @@
 SRCS       := src/start.S src/main.S
 APP        := compressed_c
 CCFLAGS    := -march=rv32imc_zicsr -mabi=ilp32 -Os -ffreestanding -nostdlib -nostartfiles
-LDSCRIPT   := ../mul_hw/memmap_rv.ld
+LDSCRIPT   := ../common/memmap_rv.ld
 TBEXEC     := ../tb_cxxrtl/tb_rv
 MAX_CYCLES := 20000
 

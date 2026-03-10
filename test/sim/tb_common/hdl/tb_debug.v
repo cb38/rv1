@@ -57,6 +57,27 @@ module tb #(
 	input  wire [W_DATA-1:0]  d_axi_r_data,
 	input  wire [1:0]         d_axi_r_resp,
 
+	// Peripheral AXI-Lite interface
+	output wire               p_axi_aw_valid,
+	input  wire               p_axi_aw_ready,
+	output wire [W_ADDR-1:0]  p_axi_aw_addr,
+	output wire [2:0]         p_axi_aw_prot,
+	output wire               p_axi_w_valid,
+	input  wire               p_axi_w_ready,
+	output wire [W_DATA-1:0]  p_axi_w_data,
+	output wire [3:0]         p_axi_w_strb,
+	input  wire               p_axi_b_valid,
+	output wire               p_axi_b_ready,
+	input  wire [1:0]         p_axi_b_resp,
+	output wire               p_axi_ar_valid,
+	input  wire               p_axi_ar_ready,
+	output wire [W_ADDR-1:0]  p_axi_ar_addr,
+	output wire [2:0]         p_axi_ar_prot,
+	input  wire               p_axi_r_valid,
+	output wire               p_axi_r_ready,
+	input  wire [W_DATA-1:0]  p_axi_r_data,
+	input  wire [1:0]         p_axi_r_resp,
+
 	// Interrupt
 	input wire                irq,
 	input wire [1:0]          soft_irq,
@@ -165,6 +186,27 @@ RV cpu (
 	.data_axi_r_payload_data    (d_axi_r_data),
 	.data_axi_r_payload_resp    (d_axi_r_resp),
 	
+	// Peripheral AXI
+	.periph_axi_aw_valid        (p_axi_aw_valid),
+	.periph_axi_aw_ready        (p_axi_aw_ready),
+	.periph_axi_aw_payload_addr (p_axi_aw_addr),
+	.periph_axi_aw_payload_prot (p_axi_aw_prot),
+	.periph_axi_w_valid         (p_axi_w_valid),
+	.periph_axi_w_ready         (p_axi_w_ready),
+	.periph_axi_w_payload_data  (p_axi_w_data),
+	.periph_axi_w_payload_strb  (p_axi_w_strb),
+	.periph_axi_b_valid         (p_axi_b_valid),
+	.periph_axi_b_ready         (p_axi_b_ready),
+	.periph_axi_b_payload_resp  (p_axi_b_resp),
+	.periph_axi_ar_valid        (p_axi_ar_valid),
+	.periph_axi_ar_ready        (p_axi_ar_ready),
+	.periph_axi_ar_payload_addr (p_axi_ar_addr),
+	.periph_axi_ar_payload_prot (p_axi_ar_prot),
+	.periph_axi_r_valid         (p_axi_r_valid),
+	.periph_axi_r_ready         (p_axi_r_ready),
+	.periph_axi_r_payload_data  (p_axi_r_data),
+	.periph_axi_r_payload_resp  (p_axi_r_resp),
+	
 	// Debug port - connected to DebugModule
 	.debug_halt_req             (dbg_halt_req),
 	.debug_resume_req           (dbg_resume_req),
@@ -180,6 +222,7 @@ RV cpu (
 
 	.irq                        (irq),
 	.timer_irq                  (timer_irq[0]),
+	.soft_irq                   (soft_irq[0]),
 	.clk                        (clk),
 	.reset                      (~rst_n)
 );

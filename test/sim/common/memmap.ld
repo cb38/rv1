@@ -11,6 +11,10 @@ SECTIONS
 {
   . = 0x80000000;
   PROVIDE(__stack_top = 0x80100000);
+
+  .bootpad : {
+    . = . + 0x40;
+  }
   /* Place the build-id as close to the ELF headers as possible.  This
      maximises the chance the build-id will be present in core files,
      which GDB can then use to locate the associated debuginfo file.  */
@@ -56,10 +60,9 @@ SECTIONS
   .plt            : { *(.plt) *(.iplt) }
   .text           :
   {
-    KEEP(*(.vectors))
+    KEEP(*(.text.startup))
     *(.text.unlikely .text.*_unlikely .text.unlikely.*)
     *(.text.exit .text.exit.*)
-    *(.text.startup .text.startup.*)
     *(.text.hot .text.hot.*)
     *(SORT(.text.sorted.*))
     *(.text .stub .text.* .gnu.linkonce.t.*)

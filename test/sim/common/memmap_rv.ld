@@ -10,7 +10,7 @@ SECTIONS
   }
 
   .text : {
-    *(.text.startup)
+    KEEP(*(.text.startup))
     *(.text .text.*)
   }
 

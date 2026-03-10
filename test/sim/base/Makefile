@@ -1,5 +1,5 @@
-SRCS := init_rv.S main.c
-APP  := hellow_rv
+SRCS := main.S
+APP  := main
 
 CCFLAGS = -march=rv32i -mabi=ilp32 -Os -ffreestanding -nostdlib -nostartfiles
 LDSCRIPT = ../common/memmap_rv.ld
@@ -15,7 +15,14 @@ RV_GEN_CMD ?= sbt "runMain rv.RVVerilog"
 
 .DEFAULT_GOAL := run
 
-rv:
-	cd $(RV_ROOT) && $(RV_GEN_CMD)
+
+
+
+
+build: 
+	$(MAKE)  bin
+
+
+
 
 include ../common/src_only_app.mk

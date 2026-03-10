@@ -2,5 +2,5 @@
 
 int main() {
 	tb_puts("Hello world from RV + CXXRTL!\n");
-	return 123;
+	return 0;
 }

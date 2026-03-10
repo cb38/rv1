@@ -73,6 +73,9 @@ object CsrReg extends SpinalEnum(binaryOneHot) {
     val MEPC       = newElement()
     val MCAUSE     = newElement()
     val MIP        = newElement()
+    val MCOUNTINHIBIT = newElement()
+    val MCYCLE     = newElement()
+    val MCYCLEH    = newElement()
     val DCSR       = newElement()
     val DPC        = newElement()
     val DSCRATCH0  = newElement()
@@ -237,7 +240,7 @@ case class RVConfig(
                 supportFormal   : Boolean = false,
                 supportFence    : Boolean = false,
                 supportDebug    : Boolean = false,
-                pcSize          : Int     = 32,
+                InstAddrSize    : Int     = 32,
                 dataAddrSize    : Int     = 32,
                 bootVector      : BigInt  = BigInt(0)
                 ) {
@@ -588,6 +591,16 @@ class CsrRegFile(config: RVConfig) extends Area {
     val mcause   = Reg(Bits(32 bits)) init(0)
     val mie      = Reg(Bits(32 bits)) init(0)
     val mip      = Reg(Bits(32 bits)) init(0)
+    val mcountinhibit = Reg(Bits(32 bits)) init(B(5, 32 bits))  // bits 0 (cy) and 2 (ir) reset to 1
+    val mcycle_lo = Reg(Bits(32 bits)) init(0)
+    val mcycle_hi = Reg(Bits(32 bits)) init(0)
+    // Auto-increment mcycle every cycle, unless inhibited by mcountinhibit(0)
+    when(!mcountinhibit(0)) {
+        val mcycleInc = (mcycle_hi.asUInt @@ mcycle_lo.asUInt) + 1
+        mcycle_lo := mcycleInc(31 downto 0).asBits
+        mcycle_hi := mcycleInc(63 downto 32).asBits
+    }
+
     val dcsr     = if(config.hasDebug) Reg(Bits(32 bits)) init(B(BigInt("40000003", 16), 32 bits)) else null
     val dpc      = if(config.hasDebug) Reg(Bits(32 bits)) init(0) else null
     val dscratch0 = if(config.hasDebug) Reg(Bits(32 bits)) init(0) else null
@@ -600,7 +613,10 @@ class CsrRegFile(config: RVConfig) extends Area {
         (0x340, CsrReg.MSCRATCH, mscratch),
         (0x341, CsrReg.MEPC,     mepc),
         (0x342, CsrReg.MCAUSE,   mcause),
-        (0x344, CsrReg.MIP,      mip)
+        (0x344, CsrReg.MIP,      mip),
+        (0x320, CsrReg.MCOUNTINHIBIT, mcountinhibit),
+        (0xB00, CsrReg.MCYCLE,   mcycle_lo),
+        (0xB80, CsrReg.MCYCLEH,  mcycle_hi)
     ) ++ (if(config.hasDebug) Seq(
         (0x7B0, CsrReg.DCSR,      dcsr),
         (0x7B1, CsrReg.DPC,       dpc),
@@ -618,7 +634,9 @@ class CsrRegFile(config: RVConfig) extends Area {
     def write(sel: SpinalEnumCraft[CsrReg.type], data: Bits): Unit = {
         switch(sel) {
             for((_, e, r) <- csrMap) is(e) {
-                if(e == CsrReg.MIP) { for(i <- 0 until 32 if i != 11 && i != 7) r(i) := data(i) }
+                if(e == CsrReg.MIP) { for(i <- 0 until 32 if i != 11 && i != 7 && i != 3) r(i) := data(i) }
+                else if(e == CsrReg.MCOUNTINHIBIT) { r(0) := data(0); r(2) := data(2) }  // only bits 0 (cy) and 2 (ir) are writable
+                else if(e == CsrReg.MEPC) { r := data; r(0) := False }  // mepc[0] is always 0 (WARL, RISC-V spec)
                 else { r := data }
             }
         }
@@ -674,7 +692,8 @@ class DebugController(config: RVConfig, csrRegs: CsrRegFile, regMem: Mem[Bits], 
     /** Drive halt / resume / ebreak / dret state machine.
       * Must be called after IRQ/jump logic so debug overrides have priority. */
     def update(valid: Bool, isEbreak: Bool, isDret: Bool,
-               pc: Bits, nextTrapPc: UInt, flush: Bool, Iptr: UInt): Unit = {
+               pc: Bits, nextTrapPc: UInt, flush: Bool, Iptr: UInt,
+               flushTargetBit1: Bool = null): Unit = {
         // External halt request – wait for pipeline idle (!valid) for clean halt
         when(debugIo.halt_req && !halted && !valid) {
             halted := True
@@ -698,14 +717,49 @@ class DebugController(config: RVConfig, csrRegs: CsrRegFile, regMem: Mem[Bits], 
             mode   := False
             Iptr := csrRegs.dpc.asUInt
             flush := True
+            if(flushTargetBit1 != null) { flushTargetBit1 := csrRegs.dpc(1) }
         }
         // dret instruction exits debug mode
         when(valid && isDret && mode) {
             mode := False
             Iptr := csrRegs.dpc.asUInt
             flush := True
+            if(flushTargetBit1 != null) { flushTargetBit1 := csrRegs.dpc(1) }
         }
     }
+}
+
+/** CLINT – Core-Local Interrupt controller.
+  * Memory map (from base address):
+  *   0x00: msip        (bit 0, R/W)
+  *   0x08: mtimecmp_lo (R/W)
+  *   0x0C: mtimecmp_hi (R/W)
+  *   0x10: mtime_lo    (R)
+  *   0x14: mtime_hi    (R) */
+class CLINT(addressWidth: Int = 16) extends Component {
+    val io = new Bundle {
+        val bus      = slave(AxiLite4(AxiLite4Config(addressWidth = addressWidth, dataWidth = 32)))
+        val timerIrq = out Bool()
+        val softIrq  = out Bool()
+    }
+
+    val msip       = RegInit(False)
+    val mtimecmpLo = Reg(Bits(32 bits)) init(B(BigInt("FFFFFFFF", 16), 32 bits))
+    val mtimecmpHi = Reg(Bits(32 bits)) init(B(BigInt("FFFFFFFF", 16), 32 bits))
+    val mtime      = Reg(UInt(64 bits)) init(0)
+
+    mtime := mtime + 1
+
+    val mtimecmp = (mtimecmpHi ## mtimecmpLo).asUInt
+    io.timerIrq := (mtime >= mtimecmp)
+    io.softIrq  := msip
+
+    val busCtrl = new AxiLite4SlaveFactory(io.bus)
+    busCtrl.readAndWrite(msip,       address = 0x00, bitOffset = 0)
+    busCtrl.readAndWrite(mtimecmpLo, address = 0x08)
+    busCtrl.readAndWrite(mtimecmpHi, address = 0x0C)
+    busCtrl.read(mtime(31 downto 0),  address = 0x10)
+    busCtrl.read(mtime(63 downto 32), address = 0x14)
 }
 
 class RV (config: RVConfig) extends Component {
@@ -728,7 +782,7 @@ class RV (config: RVConfig) extends Component {
 
     val instr_axi = master(AxiLite4ReadOnly(
         AxiLite4Config(
-            addressWidth = config.pcSize,
+            addressWidth = config.InstAddrSize,
             dataWidth    = 32
         )
     )).setName("instr_axi")
@@ -739,27 +793,37 @@ class RV (config: RVConfig) extends Component {
             dataWidth    = 32
         )
     )).setName("data_axi")
+    val periph_axi = if(!config.hasFormal) master(AxiLite4(
+        AxiLite4Config(
+            addressWidth = config.dataAddrSize,
+            dataWidth    = 32
+        )
+    )).setName("periph_axi") else null
     val irq       = in(Bool).setName("irq")
     val timer_irq = in(Bool).setName("timer_irq")
+    val soft_irq  = in(Bool).setName("soft_irq")
 
     val debug = if(config.hasDebug) DebugBus().setName("debug") else null
   }
 
 
-  // general
+   // general
     val Iptr = Reg(UInt(32 bits)) init(U(config.bootVector, 32 bits))
     val nextTrapPc = Reg(UInt(32 bits)) init(U(config.bootVector, 32 bits))
     val flush = Bool()
+    val flushTargetBit1 = if(config.hasCompressed) Bool() else null  // bit 1 of flush target PC (combinatorial)
     val coreinit = RegInit(False)
     coreinit := True  
     val irqSyncStage0 = RegNext(io.irq).init(False)
     val irqSync       = RegNext(irqSyncStage0).init(False)
     val timerIrqSyncStage0 = RegNext(io.timer_irq).init(False)
     val timerIrqSync       = RegNext(timerIrqSyncStage0).init(False)
+    val softIrqSyncStage0  = RegNext(io.soft_irq).init(False)
+    val softIrqSync        = RegNext(softIrqSyncStage0).init(False)
   
   
-  // register file
-  val RegFile =  new Area {
+   // register file
+   val RegFile =  new Area {
 
     val rs1_rd_addr = UInt(5 bits)
     val rs2_rd_addr = UInt(5 bits)
@@ -782,6 +846,7 @@ class RV (config: RVConfig) extends Component {
     val CsrRegs = new CsrRegFile(config)
     CsrRegs.mip(11) := irqSync
     CsrRegs.mip(7)  := timerIrqSync
+    CsrRegs.mip(3)  := softIrqSync
 
     val dbg = if(config.hasDebug) new DebugController(config, CsrRegs, RegFile.RegMem, io.debug) else null
   
@@ -794,15 +859,30 @@ class RV (config: RVConfig) extends Component {
         val loadPending = RegInit(False) addAttribute("keep")
         val writePending  = RegInit(False) addAttribute("keep")
 
-        rdData   := io.data_axi.r.data
-        readDone := io.data_axi.r.fire
-        writeDone := io.data_axi.b.fire
-        when(io.data_axi.r.fire) { loadPending := False }
-        when(io.data_axi.ar.fire) { loadPending := True }
-        when(io.data_axi.w.fire ) { writePending := True }
-        when(io.data_axi.b.fire) { writePending := False }
+        if(!config.hasFormal) {
+            // Track which port is active for response routing
+            val periphRead  = RegNextWhen(False, io.data_axi.r.fire || io.periph_axi.r.fire) init(False)
+            val periphWrite = RegNextWhen(False, io.data_axi.b.fire || io.periph_axi.b.fire) init(False)
 
-        // default values
+            rdData   := Mux(periphRead, io.periph_axi.r.data, io.data_axi.r.data)
+            readDone := io.data_axi.r.fire || io.periph_axi.r.fire
+            writeDone := io.data_axi.b.fire || io.periph_axi.b.fire
+            when(io.data_axi.r.fire || io.periph_axi.r.fire) { loadPending := False }
+            when(io.data_axi.ar.fire || io.periph_axi.ar.fire) { loadPending := True }
+            when(io.data_axi.w.fire || io.periph_axi.w.fire) { writePending := True }
+            when(io.data_axi.b.fire || io.periph_axi.b.fire) { writePending := False }
+        } else {
+            // Formal mode: no peripheral bus, all accesses through data_axi
+            rdData   := io.data_axi.r.data
+            readDone := io.data_axi.r.fire
+            writeDone := io.data_axi.b.fire
+            when(io.data_axi.r.fire) { loadPending := False }
+            when(io.data_axi.ar.fire) { loadPending := True }
+            when(io.data_axi.w.fire) { writePending := True }
+            when(io.data_axi.b.fire) { writePending := False }
+        }
+
+        // default values for data_axi
         io.data_axi.aw.valid := False
         io.data_axi.aw.addr  := 0
         io.data_axi.aw.prot  := B"000"
@@ -815,21 +895,68 @@ class RV (config: RVConfig) extends Component {
         io.data_axi.b.ready  := True
         io.data_axi.r.ready  := True
 
+        if(!config.hasFormal) {
+            // default values for periph_axi
+            io.periph_axi.aw.valid := False
+            io.periph_axi.aw.addr  := 0
+            io.periph_axi.aw.prot  := B"000"
+            io.periph_axi.w.valid  := False
+            io.periph_axi.w.data   := 0
+            io.periph_axi.w.strb   := 0
+            io.periph_axi.ar.valid := False
+            io.periph_axi.ar.addr  := 0
+            io.periph_axi.ar.prot  := B"000"
+            io.periph_axi.b.ready  := True
+            io.periph_axi.r.ready  := True
+        }
+
+        def isPeriphAddr(addr: UInt): Bool = {
+            if(config.hasFormal) False
+            else addr(31 downto 16) === U(0x0200, 16 bits)
+        }
+
         def WriteData(addr: UInt, data: Bits, size: Bits) = {
-            io.data_axi.aw.addr := addr.resized
-            io.data_axi.aw.valid  := !writePending
-            io.data_axi.aw.prot  := B"000"
-            io.data_axi.w.strb := size.mux(
+            val strb = (size.mux(
                 B"00"   -> B"0001",
                 B"01"   -> B"0011",
-                default -> B"1111") |<< addr(1 downto 0)
-            io.data_axi.w.data    := data
-            io.data_axi.w.valid   := !writePending
+                default -> B"1111") |<< addr(1 downto 0))
+            if(!config.hasFormal) {
+                val isPeriph = isPeriphAddr(addr)
+                when(isPeriph) {
+                    io.periph_axi.aw.addr  := addr.resized
+                    io.periph_axi.aw.valid := !writePending
+                    io.periph_axi.w.strb   := strb
+                    io.periph_axi.w.data   := data
+                    io.periph_axi.w.valid  := !writePending
+                } otherwise {
+                    io.data_axi.aw.addr  := addr.resized
+                    io.data_axi.aw.valid := !writePending
+                    io.data_axi.w.strb   := strb
+                    io.data_axi.w.data   := data
+                    io.data_axi.w.valid  := !writePending
+                }
+            } else {
+                io.data_axi.aw.addr  := addr.resized
+                io.data_axi.aw.valid := !writePending
+                io.data_axi.w.strb   := strb
+                io.data_axi.w.data   := data
+                io.data_axi.w.valid  := !writePending
+            }
         }
         def ReadData(addr: UInt) = {
-            io.data_axi.ar.addr := addr.resized
-            io.data_axi.ar.valid  := !loadPending
-            io.data_axi.ar.prot  := B"000"
+            if(!config.hasFormal) {
+                val isPeriph = isPeriphAddr(addr)
+                when(isPeriph) {
+                    io.periph_axi.ar.addr  := addr.resized
+                    io.periph_axi.ar.valid := !loadPending
+                } otherwise {
+                    io.data_axi.ar.addr  := addr.resized
+                    io.data_axi.ar.valid := !loadPending
+                }
+            } else {
+                io.data_axi.ar.addr  := addr.resized
+                io.data_axi.ar.valid := !loadPending
+            }
         }
     }
 
@@ -861,10 +988,11 @@ class RV (config: RVConfig) extends Component {
         when(!io.instr_axi.ar.valid) { loadPending := False }
 
         def Fetch(addr: UInt) = {
-            io.instr_axi.ar.addr := addr.resized
+            val wordAligned = addr(31 downto 2) @@ U"00"
+            io.instr_axi.ar.addr := wordAligned.resized
             io.instr_axi.ar.valid  := /*!loadPending && */ instrReqValid && !flush
             io.instr_axi.ar.prot  := B"000"
-            PcReg := addr
+            PcReg := wordAligned
         }
 
         pcFifo.io.flush        := flush
@@ -908,7 +1036,7 @@ class RV (config: RVConfig) extends Component {
             instrMemory.Fetch(Iptr)
         }
         when(io.instr_axi.ar.fire) {
-            Iptr := Iptr + 4
+            Iptr := (Iptr(31 downto 2) @@ U"00") + 4  // word-align before incrementing
         }
         fetchFifo.io.push.valid          := instrMemory.rdValid
         fetchFifo.io.push.payload.inst   := instrMemory.rdInst
@@ -917,8 +1045,8 @@ class RV (config: RVConfig) extends Component {
      
         val rvc = if(config.hasCompressed) new Area {
             val case2a = Bool() 
-            val stop = rvcStop.asInstanceOf[Bool]
-            fetchFifo.io.pop.ready := down.ready && !stop
+            val stopFetchFifo = rvcStop.asInstanceOf[Bool]
+            fetchFifo.io.pop.ready := down.ready && !stopFetchFifo
 
             // split fifo out into high and low half
             val lo = fetchFifo.io.pop.payload.inst(15 downto 0)
@@ -931,80 +1059,113 @@ class RV (config: RVConfig) extends Component {
             val instr32b_unaligned = Reg(Bool()) init(False)
             val instr16b_unaligned = Reg(Bool()) init(False)
             val savedPc = Reg(UInt(32 bits)) init(0)
+            // When a flush targets addr%4==2, the first fetched word contains
+            // the target instruction in its hi halfword (bits[31:16]).
+            // This flag tells the decoder to skip lo and start from hi.
+            val flushToHi = Reg(Bool()) init(False)
             
             // 4  cases for compressed instructions:
             // 1. lo is 32b -> push 32b 
-            // 2a. lo is 16b and hi is 16b   -> push lo, save PC, stop FIFO
+            // 2a. lo is 16b and hi is 16b   -> push lo, save PC, stopFetch FIFO
             // 2b. lo is 16b and hi is 16b   -> push hi from register, resume FIFO
             // 3. lo is 16b and hi is 32b ( split in two words ) -> push lo then store hi for next cycle
             // 4. lo is the hi part half of the previously unaligned 32b instruction -> push reconstructed 32b 
+            // 5. after flush to addr%4==2: skip lo (supress valid), treat as if hi is the first instruction
+            val suppressValid = Bool()
+            suppressValid := False
             when (down.ready && (fetchFifo.io.pop.valid || instr16b_unaligned)) {
                 // Only update unaligned_lo when pipeline advances,
                 // to avoid corruption during stalls (hi changes due to FIFO pop)
                 unaligned_lo := hi
 
-                when (instr32b_unaligned) { // case 4
+                when (flushToHi) { // case 5: first word after flush to addr%4==2
+                    // hi contains the target instruction; lo must be skipped.
+                    flushToHi := False
+                    when (instr_hi_is_rvi) {
+                        // 32-bit instruction starts in hi, continues in next word's lo.
+                        // Save hi for reconstruction, consume this FIFO entry, emit nothing.
+                        pc_unaligned := True
+                        instr32b_unaligned := True
+                        instr16b_unaligned := False
+                        stopFetchFifo := False
+                        suppressValid := True
+                        instr_push := 0
+                    } otherwise {
+                        // 16-bit compressed instruction in hi — push it directly.
+                        // The FIFO PC already points to the target (addr%4==2),
+                        // so no pc_unaligned adjustment needed.
+                        instr_push := hi.resized
+                        pc_unaligned := False
+                        instr32b_unaligned := False
+                        instr16b_unaligned := False
+                        stopFetchFifo := False
+                    }
+                } elsewhen (instr32b_unaligned) { // case 4
                     instr_push := lo ## unaligned_lo  
                     when (instr_hi_is_rvi) {
                         pc_unaligned := True
                         instr32b_unaligned := True
                         instr16b_unaligned := False
-                        stop := False
+                        stopFetchFifo := False
                     } otherwise { 
                         pc_unaligned := True
                         instr32b_unaligned := False
                         instr16b_unaligned := True
                         savedPc := fetchFifo.io.pop.payload.pc.asUInt
-                        stop := True
+                        stopFetchFifo := True
                     }
                 } elsewhen (instr_lo_is_rvi && !instr16b_unaligned ) { // case 1
                     instr_push := hi ## lo
                     pc_unaligned := False
                     instr32b_unaligned := False
                     instr16b_unaligned := False
-                    stop := False
+                    stopFetchFifo := False
                 } elsewhen  (instr_hi_is_rvi && !instr16b_unaligned) { // case 3
                     instr_push := lo.resized
                     pc_unaligned := True
                     instr32b_unaligned := True
                     instr16b_unaligned := False
-                    stop := False
-                } otherwise { // case 2
-                    when (instr16b_unaligned) { // case 2b
-                        instr_push := unaligned_lo.resized
-                        pc_unaligned := False
-                        instr32b_unaligned := False
-                        instr16b_unaligned := False
-                        stop := False
-                    } otherwise { // case 2a
-                        instr_push := lo.resized
-                        pc_unaligned := True
-                        instr32b_unaligned := False
-                        instr16b_unaligned := True
-                        savedPc := fetchFifo.io.pop.payload.pc.asUInt
-                        stop := True
-                    }
-                    
+                    stopFetchFifo := False
+                } elsewhen (instr16b_unaligned) { // case 2b
+                    instr_push := unaligned_lo.resized
+                    pc_unaligned := False
+                    instr32b_unaligned := False
+                    instr16b_unaligned := False
+                    stopFetchFifo := False
+                } otherwise { // case 2a
+                    instr_push := lo.resized
+                    pc_unaligned := True
+                    instr32b_unaligned := False
+                    instr16b_unaligned := True
+                    savedPc := fetchFifo.io.pop.payload.pc.asUInt
+                    stopFetchFifo := True
                 }
+                    
+                
             } otherwise {
                 instr_push := 0
             }
             case2a := instr16b_unaligned
             val pc_push = UInt(32 bits)
+            // flushToHi with compressed: fetchFifo.pc is word-aligned but target is at +2
+            val flushHiAdj = flushToHi && !instr_hi_is_rvi && fetchFifo.io.pop.valid
             // In case 2b, use saved PC + 2; otherwise derive from FIFO
             pc_push := instr16b_unaligned ? (savedPc + 2) | 
-                       (fetchFifo.io.pop.payload.pc.asUInt - (pc_unaligned ? U(2, 32 bits) | U(0, 32 bits)))
+                       (fetchFifo.io.pop.payload.pc.asUInt
+                        - (pc_unaligned ? U(2, 32 bits) | U(0, 32 bits))
+                        + (flushHiAdj   ? U(2, 32 bits) | U(0, 32 bits)))
 
             // case 2b: instruction comes from register, valid even when FIFO is stopped
-            up.valid    := fetchFifo.io.pop.valid || instr16b_unaligned
+            up.valid    := (fetchFifo.io.pop.valid || instr16b_unaligned) && !suppressValid
             INSTRUCTION := instr_push
             PC          := pc_push.asBits
 
             when(flush) {
-                stop := False
+                stopFetchFifo := False
                 instr16b_unaligned := False
                 instr32b_unaligned := False
                 pc_unaligned := False
+                flushToHi := flushTargetBit1
             }
 
         } else new Area {
@@ -1197,6 +1358,7 @@ class RV (config: RVConfig) extends Component {
     val valid = Bool().simPublic()
     valid := up.isValid
     flush := False 
+    if(config.hasCompressed) { flushTargetBit1 := False }
 
     val alu = new Area {
 
@@ -1311,6 +1473,7 @@ class RV (config: RVConfig) extends Component {
         when (take_jump) {
           Iptr := pc_jump
           flush := True
+          if(config.hasCompressed) { flushTargetBit1 := pc_jump(1) }
         }
 
         
@@ -1373,21 +1536,30 @@ class RV (config: RVConfig) extends Component {
         val mret_target = U(0, 32 bits)
         val irqCauseExternal = B(BigInt("8000000B", 16), 32 bits)
         val irqCauseTimer    = B(BigInt("80000007", 16), 32 bits)
+        val irqCauseSoftware = B(BigInt("80000003", 16), 32 bits)
         val mie_meie    = CsrRegs.mie(11)
         val mip_meip    = CsrRegs.mip(11)
         val mie_mtie    = CsrRegs.mie(7)
         val mip_mtip    = CsrRegs.mip(7)
+        val mie_msie    = CsrRegs.mie(3)
+        val mip_msip    = CsrRegs.mip(3)
         val mstatus_mie = CsrRegs.mstatus(3)
         val ext_irq_pending   = mie_meie && mip_meip
         val timer_irq_pending = mie_mtie && mip_mtip
-        val irq_pending = (ext_irq_pending || timer_irq_pending) && mstatus_mie
-        val irqCauseValue = ext_irq_pending ? irqCauseExternal | irqCauseTimer
+        val soft_irq_pending  = mie_msie && mip_msip
+        val irq_pending = (ext_irq_pending || timer_irq_pending || soft_irq_pending) && mstatus_mie
+        // Priority: external > software > timer (per RISC-V privilege spec)
+        val irqCauseValue = ext_irq_pending ? irqCauseExternal |
+                            (soft_irq_pending ? irqCauseSoftware | irqCauseTimer)
         val take_irq    = irq_pending && !valid && !(if(config.hasDebug) dbg.halted else False)
         val mtvec_base  = (CsrRegs.mtvec(31 downto 2) ## B"00")
+        val mtvec_mode  = CsrRegs.mtvec(1 downto 0)
         val isMret      = (itype === InstrType.E) && (instr(31 downto 20) === B"001100000010")
         when(take_irq){
             irq_taken  := True
-            irq_target := mtvec_base.asUInt
+            // Vectored mode (mode=1): BASE + 4*cause_code; Direct mode (mode=0): BASE
+            val causeCode = irqCauseValue(30 downto 0).asUInt
+            irq_target := Mux(mtvec_mode(0), (mtvec_base.asUInt + (causeCode << 2)).resized, mtvec_base.asUInt)
             CsrRegs.mepc   := nextTrapPc.asBits
             CsrRegs.mcause := irqCauseValue
             val irqMstatusNext = Bits(32 bits)
@@ -1416,14 +1588,17 @@ class RV (config: RVConfig) extends Component {
         Iptr := irq.irq_target
         flush := True
         nextTrapPc := irq.irq_target
+        if(config.hasCompressed) { flushTargetBit1 := irq.irq_target(1) }
     } elsewhen(irq.mret_taken){
         Iptr := irq.mret_target
         flush := True
         nextTrapPc := irq.mret_target
+        if(config.hasCompressed) { flushTargetBit1 := irq.mret_target(1) }
     } elsewhen(jump.take_jump){
         Iptr := jump.pc_jump
         flush := True
         nextTrapPc := jump.pc_jump
+        if(config.hasCompressed) { flushTargetBit1 := jump.pc_jump(1) }
     }
 
     // Common instruction decode for debug/formal
@@ -1432,7 +1607,8 @@ class RV (config: RVConfig) extends Component {
 
     // Debug halt / resume / ebreak / dret
     if(config.hasDebug) {
-        dbg.update(valid, isEbreak, isDret, pc.asBits, nextTrapPc, flush, Iptr)
+        dbg.update(valid, isEbreak, isDret, pc.asBits, nextTrapPc, flush, Iptr, 
+                   if(config.hasCompressed) flushTargetBit1 else null)
     }
 
     val execRetire = execute.isValid && !flush && !haltRequest && (!dataMemory.loadPending || dataMemory.readDone)

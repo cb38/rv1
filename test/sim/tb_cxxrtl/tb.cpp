@@ -95,6 +95,15 @@ tb_cxxrtl_top::tb_cxxrtl_top(const tb_cli_args &args): tb_top {args} {
 	top.p_d__axi__r__data.set<uint32_t>(0);
 	top.p_d__axi__r__resp.set<uint32_t>(0);
 
+	top.p_p__axi__aw__ready.set<bool>(true);
+	top.p_p__axi__w__ready.set<bool>(false);
+	top.p_p__axi__b__valid.set<bool>(false);
+	top.p_p__axi__b__resp.set<uint32_t>(0);
+	top.p_p__axi__ar__ready.set<bool>(true);
+	top.p_p__axi__r__valid.set<bool>(false);
+	top.p_p__axi__r__data.set<uint32_t>(0);
+	top.p_p__axi__r__resp.set<uint32_t>(0);
+
 	top.p_irq.set<bool>(false);
 	top.p_soft__irq.set<uint32_t>(0);
 	top.p_timer__irq.set<uint32_t>(0);
@@ -245,12 +254,121 @@ void tb_cxxrtl_top::step(const tb_cli_args &args, mem_io_state &memio) {
 	} else if (top.p_d__axi__b__valid.get<bool>() && top.p_d__axi__b__ready.get<bool>()) {
 		top.p_d__axi__b__valid.set<bool>(false);
 	}
+
+	// Handle peripheral read AXI transactions
+	static bool p_r_pending_valid = false;
+	static uint32_t p_r_pending_data = 0;
+	static uint32_t p_r_pending_resp = 0;
+
+	bool p_r_was_valid = top.p_p__axi__r__valid.get<bool>();
+	bool p_r_was_ready = top.p_p__axi__r__ready.get<bool>();
+	bool p_r_busy = p_r_pending_valid || p_r_was_valid;
+	top.p_p__axi__ar__ready.set<bool>(!p_r_busy);
+
+	if (p_r_was_valid && p_r_was_ready) {
+		top.p_p__axi__r__valid.set<bool>(false);
+	}
+
+	if (!p_r_was_valid && p_r_pending_valid) {
+		top.p_p__axi__r__valid.set<bool>(true);
+		top.p_p__axi__r__data.set<uint32_t>(p_r_pending_data);
+		top.p_p__axi__r__resp.set<uint32_t>(p_r_pending_resp);
+		p_r_pending_valid = false;
+	}
+
+	if (top.p_p__axi__ar__valid.get<bool>() && top.p_p__axi__ar__ready.get<bool>()) {
+		bus_request req;
+		req.addr = top.p_p__axi__ar__addr.get<uint32_t>();
+		TB_DBG(cycle, "[dbg] p_ar=%08x\n", req.addr);
+		req.size = SIZE_WORD;
+		req.write = false;
+		req.excl = false;
+		bus_response resp = mem_callback_d(*this, memio, req);
+		p_r_pending_valid = true;
+		p_r_pending_data = resp.rdata;
+		p_r_pending_resp = resp.err ? 2u : 0u;
+		TB_DBG(cycle, "[dbg] p_r data=%08x resp=%u\n", resp.rdata, resp.err ? 2u : 0u);
+	}
+
+	// Handle peripheral write AXI transactions
+	static bool p_aw_pending = false;
+	static uint32_t p_aw_addr = 0;
+	static bool p_w_pending = false;
+	static uint32_t p_w_data = 0;
+	static uint32_t p_w_strb = 0;
+	
+	if (top.p_p__axi__aw__valid.get<bool>() && top.p_p__axi__aw__ready.get<bool>()) {
+		p_aw_pending = true;
+		p_aw_addr = top.p_p__axi__aw__addr.get<uint32_t>();
+		top.p_p__axi__w__ready.set<bool>(true);
+		TB_DBG(cycle, "[dbg] p_aw=%08x\n", p_aw_addr);
+	}
+	
+	if (top.p_p__axi__w__valid.get<bool>() && top.p_p__axi__w__ready.get<bool>()) {
+		p_w_pending = true;
+		p_w_data = top.p_p__axi__w__data.get<uint32_t>();
+		p_w_strb = top.p_p__axi__w__strb.get<uint32_t>();
+		TB_DBG(cycle, "[dbg] p_w data=%08x strb=%x\n", p_w_data, p_w_strb);
+	}
+	
+	if (p_aw_pending && p_w_pending) {
+		bus_response merged_resp;
+		if (p_w_strb == 0x1u || p_w_strb == 0x2u || p_w_strb == 0x4u || p_w_strb == 0x8u) {
+			int byte = (p_w_strb == 0x1u) ? 0 : (p_w_strb == 0x2u) ? 1 : (p_w_strb == 0x4u) ? 2 : 3;
+			bus_request req;
+			req.addr = p_aw_addr + (uint32_t)byte;
+			req.size = SIZE_BYTE;
+			req.write = true;
+			req.excl = false;
+			req.wdata = (p_w_data >> (8 * byte)) & 0xffu;
+			bus_response resp = mem_callback_d(*this, memio, req);
+			merged_resp.err = resp.err;
+		} else if (p_w_strb == 0x3u || p_w_strb == 0xCu) {
+			int half = (p_w_strb == 0x3u) ? 0 : 2;
+			bus_request req;
+			req.addr = p_aw_addr + (uint32_t)half;
+			req.size = SIZE_HWORD;
+			req.write = true;
+			req.excl = false;
+			req.wdata = (p_w_data >> (8 * half)) & 0xffffu;
+			bus_response resp = mem_callback_d(*this, memio, req);
+			merged_resp.err = resp.err;
+		} else if (p_w_strb == 0xFu) {
+			bus_request req;
+			req.addr = p_aw_addr;
+			req.size = SIZE_WORD;
+			req.write = true;
+			req.excl = false;
+			req.wdata = p_w_data;
+			bus_response resp = mem_callback_d(*this, memio, req);
+			merged_resp.err = resp.err;
+		} else {
+			TB_DBG(cycle, "[dbg] invalid p_w_strb=%x p_aw=%08x p_w=%08x\n", p_w_strb, p_aw_addr, p_w_data);
+			merged_resp.err = true;
+		}
+		top.p_p__axi__b__valid.set<bool>(true);
+		top.p_p__axi__b__resp.set<uint32_t>(merged_resp.err ? 2u : 0u);
+		TB_DBG(cycle, "[dbg] p_b resp=%u\n", merged_resp.err ? 2u : 0u);
+		p_aw_pending = false;
+		p_w_pending = false;
+		top.p_p__axi__w__ready.set<bool>(false);
+	} else if (top.p_p__axi__b__valid.get<bool>() && top.p_p__axi__b__ready.get<bool>()) {
+		top.p_p__axi__b__valid.set<bool>(false);
+	}
 	
 	top.p_clk.set<bool>(true);
 	STEP();
 	STEP(); // workaround for github.com/YosysHQ/yosys/issues/2780
 	if (args.dump_waves)
 		vcd.sample(cycle * 2 + 1);
+
+	// Trace executed instructions
+	if (top.p_cpu_2e_execute__up__valid.get<bool>()) {
+		uint32_t epc   = top.p_cpu_2e_execute__up__PC.get<uint32_t>();
+		uint32_t einstr = top.p_cpu_2e_execute__up__DECODED__INSTR.get<uint32_t>();
+		bool is_c = top.p_cpu_2e_execute__up__decoder__IS__C.get<bool>();
+		TB_DBG(cycle, "[exec] pc=%08x instr=%08x %s\n", epc, einstr, is_c ? "C" : "");
+	}
 
 	++cycle;
 }
