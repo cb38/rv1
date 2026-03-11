@@ -24,7 +24,10 @@ object RVVerilog extends App {
   config.generateVerilog(new RV(config = RVConfig(supportFormal = false,
                                                  supportMulDiv = true,
                                                  supportCompressed = true,
-
+                                                 supportZbs = true,
+                                                 supportZba = true,
+                                                 supportZbb = true,
+                                                 supportZbkb = true,
                                                  supportDebug = true,
                                                  bootVector = BigInt("80000040", 16)))).printPruned()
   config.generateVerilog(new DebugModule).printPruned()
@@ -38,6 +41,10 @@ object RVFormalVerilog extends App {
   config.generateVerilog(new RV(config = RVConfig(supportFormal = true,
                                                  supportMulDiv = true,
                                                  supportCompressed = true,
+                                                 supportZbs = true,
+                                                 supportZba = true,
+                                                 supportZbb = true,
+                                                 supportZbkb = true,
                                                  supportDebug = true,
                                                  bootVector = BigInt("80000040", 16))).setDefinitionName("RV_formal")).printPruned()
 }

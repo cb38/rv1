@@ -60,6 +60,7 @@ SECTIONS
   .plt            : { *(.plt) *(.iplt) }
   .text           :
   {
+    KEEP(*(.text.init))
     KEEP(*(.text.startup))
     *(.text.unlikely .text.*_unlikely .text.unlikely.*)
     *(.text.exit .text.exit.*)

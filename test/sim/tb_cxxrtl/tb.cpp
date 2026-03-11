@@ -215,7 +215,7 @@ void tb_cxxrtl_top::step(const tb_cli_args &args, mem_io_state &memio) {
 		if (w_strb == 0x1u || w_strb == 0x2u || w_strb == 0x4u || w_strb == 0x8u) {
 			int byte = (w_strb == 0x1u) ? 0 : (w_strb == 0x2u) ? 1 : (w_strb == 0x4u) ? 2 : 3;
 			bus_request req;
-			req.addr = aw_addr + (uint32_t)byte;
+			req.addr = (aw_addr & ~3u) + (uint32_t)byte;
 			req.size = SIZE_BYTE;
 			req.write = true;
 			req.excl = false;
@@ -225,7 +225,7 @@ void tb_cxxrtl_top::step(const tb_cli_args &args, mem_io_state &memio) {
 		} else if (w_strb == 0x3u || w_strb == 0xCu) {
 			int half = (w_strb == 0x3u) ? 0 : 2;
 			bus_request req;
-			req.addr = aw_addr + (uint32_t)half;
+			req.addr = (aw_addr & ~3u) + (uint32_t)half;
 			req.size = SIZE_HWORD;
 			req.write = true;
 			req.excl = false;
@@ -316,7 +316,7 @@ void tb_cxxrtl_top::step(const tb_cli_args &args, mem_io_state &memio) {
 		if (p_w_strb == 0x1u || p_w_strb == 0x2u || p_w_strb == 0x4u || p_w_strb == 0x8u) {
 			int byte = (p_w_strb == 0x1u) ? 0 : (p_w_strb == 0x2u) ? 1 : (p_w_strb == 0x4u) ? 2 : 3;
 			bus_request req;
-			req.addr = p_aw_addr + (uint32_t)byte;
+			req.addr = (p_aw_addr & ~3u) + (uint32_t)byte;
 			req.size = SIZE_BYTE;
 			req.write = true;
 			req.excl = false;
@@ -326,7 +326,7 @@ void tb_cxxrtl_top::step(const tb_cli_args &args, mem_io_state &memio) {
 		} else if (p_w_strb == 0x3u || p_w_strb == 0xCu) {
 			int half = (p_w_strb == 0x3u) ? 0 : 2;
 			bus_request req;
-			req.addr = p_aw_addr + (uint32_t)half;
+			req.addr = (p_aw_addr & ~3u) + (uint32_t)half;
 			req.size = SIZE_HWORD;
 			req.write = true;
 			req.excl = false;

@@ -45,6 +45,7 @@ object InstrType extends SpinalEnum(binaryOneHot) {
     val ALU_ADD = newElement()
     val ALU     = newElement()
     val SHIFT   = newElement()
+    val BITMANIP = newElement()
     val FENCE   = newElement()
     val E       = newElement()
     val CSR     = newElement()
@@ -240,6 +241,10 @@ case class RVConfig(
                 supportFormal   : Boolean = false,
                 supportFence    : Boolean = false,
                 supportDebug    : Boolean = false,
+                supportZbs      : Boolean = false,
+                supportZba      : Boolean = false,
+                supportZbb      : Boolean = false,
+                supportZbkb     : Boolean = false,
                 InstAddrSize    : Int     = 32,
                 dataAddrSize    : Int     = 32,
                 bootVector      : BigInt  = BigInt(0)
@@ -249,7 +254,11 @@ case class RVConfig(
     def hasCompressed = supportCompressed
     def hasFence    = supportFence
     def hasDebug    = supportDebug
-
+    def hasZbs      = supportZbs
+    def hasZba      = supportZba
+    def hasZbb      = supportZbb
+    def hasZbkb     = supportZbkb
+    def hasAnyBitmanip = supportZbs || supportZba || supportZbb || supportZbkb
 
     def hasFormal   = supportFormal
 }
@@ -517,11 +526,43 @@ object RVDecode {
                         when(funct7 === B"0000000"){
                             r.itype := InstrType.SHIFT
                         }
+                        if(config.hasZbs) {
+                            when(funct7 === B"0010100" || funct7 === B"0100100" || funct7 === B"0110100"){
+                                r.itype := InstrType.BITMANIP
+                            }
+                        }
+                        if(config.hasZbb) {
+                            // clz/ctz/cpop/sext.b/sext.h: funct7=0110000, shamt encodes which op
+                            when(funct7 === B"0110000") { r.itype := InstrType.BITMANIP }
+                        }
+                        if(config.hasZbkb) {
+                            // zip: funct7=0000100, shamt=01111
+                            when(funct7 === B"0000100" && instr(24 downto 20) === B"01111") { r.itype := InstrType.BITMANIP }
+                        }
                         r.iformat := InstrFormat.Shamt
                     }
                     is(B"101"){
                         when(funct7 === B"0000000" || funct7 === B"0100000"){
                             r.itype := InstrType.SHIFT
+                        }
+                        if(config.hasZbs) {
+                            when(funct7 === B"0100100"){
+                                r.itype := InstrType.BITMANIP
+                            }
+                        }
+                        if(config.hasZbb || config.hasZbkb) {
+                            // rori: funct7=0110000
+                            when(funct7 === B"0110000") { r.itype := InstrType.BITMANIP }
+                            // orc.b: funct7=0010100, shamt=00111
+                            when(funct7 === B"0010100" && instr(24 downto 20) === B"00111") { r.itype := InstrType.BITMANIP }
+                            // rev8 (RV32): funct7=0110100, shamt=11000
+                            when(funct7 === B"0110100" && instr(24 downto 20) === B"11000") { r.itype := InstrType.BITMANIP }
+                        }
+                        if(config.hasZbkb) {
+                            // brev8: funct7=0110100, shamt=00111
+                            when(funct7 === B"0110100" && instr(24 downto 20) === B"00111") { r.itype := InstrType.BITMANIP }
+                            // unzip: funct7=0000100, shamt=01111
+                            when(funct7 === B"0000100" && instr(24 downto 20) === B"01111") { r.itype := InstrType.BITMANIP }
                         }
                         r.iformat := InstrFormat.Shamt
                     }
@@ -556,6 +597,29 @@ object RVDecode {
                             r.itype    := InstrType.ALU
                             r.unsigned := funct3(0)
                             r.sub      := True
+                        }
+                        if(config.hasZbs) {
+                            is(B"0010100_001", B"0100100_001", B"0110100_001", B"0100100_101"){
+                                r.itype := InstrType.BITMANIP
+                            }
+                        }
+                        if(config.hasZba) {
+                            // sh1add/sh2add/sh3add: funct7=0010000, funct3=010/100/110
+                            is(B"0010000_010", B"0010000_100", B"0010000_110") { r.itype := InstrType.BITMANIP }
+                        }
+                        if(config.hasZbb) {
+                            // xnor/orn/andn: funct7=0100000, funct3=100/110/111
+                            is(B"0100000_100", B"0100000_110", B"0100000_111") { r.itype := InstrType.BITMANIP }
+                            // min/minu/max/maxu: funct7=0000101, funct3=100/101/110/111
+                            is(B"0000101_100", B"0000101_101", B"0000101_110", B"0000101_111") { r.itype := InstrType.BITMANIP }
+                        }
+                        if(config.hasZbb || config.hasZbkb) {
+                            // rol/ror: funct7=0110000, funct3=001/101
+                            is(B"0110000_001", B"0110000_101") { r.itype := InstrType.BITMANIP }
+                        }
+                        if(config.hasZbkb) {
+                            // pack/packh: funct7=0000100, funct3=100/111
+                            is(B"0000100_100", B"0000100_111") { r.itype := InstrType.BITMANIP }
                         }
                     }
                 }
@@ -1417,6 +1481,119 @@ class RV (config: RVConfig) extends Component {
         rd_wdata := U(shleft ? (op1_33 |<< shamt) | (op1_33 |>> shamt))(31 downto 0)
     }
 
+    val bitmanip = if(config.hasAnyBitmanip) new Area {
+        val rd_wr    = (itype === InstrType.BITMANIP)
+        val rd_wdata = UInt(32 bits)
+        val shamt    = U(op2(4 downto 0))          // UInt(5 bits)
+        val mask     = U(1, 32 bits) |<< shamt
+        val f7       = instr(31 downto 25)          // Bits(7): funct7
+        val f3       = instr(14 downto 12)          // Bits(3): funct3
+        val isRtype  = instr(5)                     // 1=ALU(0110011), 0=ALUI(0010011)
+        val shamt_raw = instr(24 downto 20)         // Bits(5): literal shamt field
+        val b1       = op1.asBits                   // Bits(32): bitwise view of rs1
+        val b2       = op2.asBits                   // Bits(32): bitwise view of rs2
+        val u1       = U(b1)                        // UInt(32)
+        val u2       = U(b2)                        // UInt(32)
+        val s1       = S(b1)                        // SInt(32)
+        val s2       = S(b2)                        // SInt(32)
+
+        // Rotation helpers
+        val neg_shamt = (U(32, 6 bits) - shamt.resize(6)).resize(5)
+        val ror_result = (u1 |>> shamt   )(31 downto 0) | (u1 |<< neg_shamt)(31 downto 0)
+        val rol_result = (u1 |<< shamt   )(31 downto 0) | (u1 |>> neg_shamt)(31 downto 0)
+
+        // CLZ: iterate 0→31, last override (highest set bit) wins
+        val clz_val = UInt(6 bits)
+        clz_val := 32
+        for(i <- 0 to 31) { when(b1(i)) { clz_val := (31 - i) } }
+
+        // CTZ: iterate 31→0, last override (lowest set bit) wins
+        val ctz_val = UInt(6 bits)
+        ctz_val := 32
+        for(i <- 31 downto 0) { when(b1(i)) { ctz_val := i } }
+
+        // CPOP: Scala var accumulator builds combinational adder chain
+        var cpop_acc: UInt = U(0, 6 bits)
+        for(i <- 0 to 31) { cpop_acc = cpop_acc + b1(i).asUInt.resize(6) }
+        val cpop_val = cpop_acc
+
+        // ORC.B: each byte → 0xFF if any bit set, else 0x00
+        val orc_b = Bits(32 bits)
+        for(i <- 0 until 4) {
+            orc_b(i*8+7 downto i*8) := b1(i*8+7 downto i*8).orR ? B"8'hff" | B"8'h00"
+        }
+
+        // BREV8: bit-reverse each byte
+        val brev8_val = Bits(32 bits)
+        for(byte <- 0 until 4) { for(j <- 0 until 8) { brev8_val(byte*8+j) := b1(byte*8+(7-j)) } }
+
+        // ZIP: interleave halves — rd[2i]=rs1[i], rd[2i+1]=rs1[16+i]
+        val zip_val = Bits(32 bits)
+        for(i <- 0 until 16) { zip_val(2*i) := b1(i); zip_val(2*i+1) := b1(16+i) }
+
+        // UNZIP: de-interleave — rd[i]=rs1[2i], rd[16+i]=rs1[2i+1]
+        val unzip_val = Bits(32 bits)
+        for(i <- 0 until 16) { unzip_val(i) := b1(2*i); unzip_val(16+i) := b1(2*i+1) }
+
+        rd_wdata := 0
+        switch(f7 ## f3) {
+            // ---- Zbs ----
+            is(B"0010100_001") { rd_wdata := U(b1 |  mask.asBits) }   // BSET/BSETI
+            is(B"0100100_001") { rd_wdata := U(b1 & ~mask.asBits) }   // BCLR/BCLRI
+            is(B"0110100_001") { rd_wdata := U(b1 ^  mask.asBits) }   // BINV/BINVI
+            is(B"0100100_101") { rd_wdata := U(b1(shamt)).resize(32) } // BEXT/BEXTI
+
+            // ---- Zba ----
+            is(B"0010000_010") { rd_wdata := (u2 + (u1 |<< 1))(31 downto 0) }  // SH1ADD
+            is(B"0010000_100") { rd_wdata := (u2 + (u1 |<< 2))(31 downto 0) }  // SH2ADD
+            is(B"0010000_110") { rd_wdata := (u2 + (u1 |<< 3))(31 downto 0) }  // SH3ADD
+
+            // ---- Zbb bitwise (R-type) ----
+            is(B"0100000_100") { rd_wdata := U(~(b1 ^ b2)) }           // XNOR
+            is(B"0100000_110") { rd_wdata := U( b1 | ~b2)  }           // ORN
+            is(B"0100000_111") { rd_wdata := U( b1 & ~b2)  }           // ANDN
+
+            // ---- Zbb min/max ----
+            is(B"0000101_100") { rd_wdata := (s1 < s2) ? u1 | u2 }    // MIN
+            is(B"0000101_101") { rd_wdata := (u1 < u2) ? u1 | u2 }    // MINU
+            is(B"0000101_110") { rd_wdata := (s1 > s2) ? u1 | u2 }    // MAX
+            is(B"0000101_111") { rd_wdata := (u1 > u2) ? u1 | u2 }    // MAXU
+
+            // ---- Zbb/Zbkb rotate + Zbb unary ----
+            is(B"0110000_001") {                                        // ROL (R-type) or CLZ/CTZ/CPOP/SEXT (I-type)
+                when(isRtype) {
+                    rd_wdata := rol_result
+                } otherwise {
+                    switch(shamt_raw) {
+                        is(B"00000") { rd_wdata := clz_val.resize(32) }           // CLZ
+                        is(B"00001") { rd_wdata := ctz_val.resize(32) }           // CTZ
+                        is(B"00010") { rd_wdata := cpop_val.resize(32) }          // CPOP
+                        is(B"00100") { rd_wdata := U(S(b1( 7 downto 0)).resize(32)) }  // SEXT.B
+                        is(B"00101") { rd_wdata := U(S(b1(15 downto 0)).resize(32)) }  // SEXT.H
+                    }
+                }
+            }
+            is(B"0110000_101") { rd_wdata := ror_result }              // ROR (R) / RORI (I)
+            is(B"0010100_101") { rd_wdata := orc_b.asUInt }            // ORC.B  (funct7=0010100, shamt=00111)
+            is(B"0110100_101") {                                        // REV8 (shamt=11000) or BREV8 (shamt=00111)
+                when(shamt_raw === B"11000") {
+                    rd_wdata := U(b1(7 downto 0) ## b1(15 downto 8) ## b1(23 downto 16) ## b1(31 downto 24))
+                } otherwise {
+                    rd_wdata := brev8_val.asUInt
+                }
+            }
+
+            // ---- Zbkb ----
+            is(B"0000100_100") { rd_wdata := U(b2(15 downto 0) ## b1(15 downto 0)) }         // PACK
+            is(B"0000100_111") { rd_wdata := U(B(0,16 bits) ## b2(7 downto 0) ## b1(7 downto 0)) }  // PACKH
+            is(B"0000100_001") { rd_wdata := zip_val.asUInt   }        // ZIP   (shamt=01111)
+            is(B"0000100_101") { rd_wdata := unzip_val.asUInt }        // UNZIP (shamt=01111)
+        }
+    } else new Area {
+        val rd_wr    = False
+        val rd_wdata = U(0, 32 bits)
+    }
+
     val jump = new Area {
 
         val take_jump     = False
@@ -1752,14 +1929,15 @@ class RV (config: RVConfig) extends Component {
         }
     }
     
-    val rd_wr    = execute.isValid && (alu.rd_wr | jump.rd_wr | shift.rd_wr | lsu.rd_wr | mul.rd_wr | csr.rd_wr) && (rd_addr =/= 0)
+    val rd_wr    = execute.isValid && (alu.rd_wr | jump.rd_wr | shift.rd_wr | bitmanip.rd_wr | lsu.rd_wr | mul.rd_wr | csr.rd_wr) && (rd_addr =/= 0)
     val rd_waddr = rd_addr
-    val rd_wdata = B((alu.rd_wdata.range   -> alu.rd_wr))   & B(alu.rd_wdata)   |
-                   B((jump.rd_wdata.range  -> jump.rd_wr))  & B(jump.rd_wdata)  |
-                   B((shift.rd_wdata.range -> shift.rd_wr)) & B(shift.rd_wdata) |
-                   B((lsu.rd_wdata.range   -> lsu.rd_wr))   & B(lsu.rd_wdata)   |
-                   B((mul.rd_wdata.range   -> mul.rd_wr))   & B(mul.rd_wdata)   |
-                   B((csr.rd_wdata.range   -> csr.rd_wr))   & B(csr.rd_wdata)
+    val rd_wdata = B((alu.rd_wdata.range      -> alu.rd_wr))      & B(alu.rd_wdata)      |
+                   B((jump.rd_wdata.range     -> jump.rd_wr))     & B(jump.rd_wdata)     |
+                   B((shift.rd_wdata.range    -> shift.rd_wr))    & B(shift.rd_wdata)    |
+                   B((bitmanip.rd_wdata.range -> bitmanip.rd_wr)) & B(bitmanip.rd_wdata) |
+                   B((lsu.rd_wdata.range      -> lsu.rd_wr))      & B(lsu.rd_wdata)      |
+                   B((mul.rd_wdata.range      -> mul.rd_wr))      & B(mul.rd_wdata)      |
+                   B((csr.rd_wdata.range      -> csr.rd_wr))      & B(csr.rd_wdata)
 
     // register file
     RegFile.rd_wr       := rd_wr

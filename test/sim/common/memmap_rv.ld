@@ -10,6 +10,7 @@ SECTIONS
   }
 
   .text : {
+    KEEP(*(.text.init))
     KEEP(*(.text.startup))
     *(.text .text.*)
   }
