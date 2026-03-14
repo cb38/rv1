@@ -1,0 +1,6 @@
+open_hw_manager
+connect_hw_server
+open_hw_target
+set_property PROGRAM.FILE fpga.bit [current_hw_device]
+program_hw_device [current_hw_device]
+disconnect_hw_server

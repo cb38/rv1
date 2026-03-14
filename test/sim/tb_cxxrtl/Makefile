@@ -1,7 +1,7 @@
 # Build testbench for RV core with AXI interfaces
 # Usage: make -f Makefile.rv
 
-include ../project_paths.mk
+include ../../../project_paths.mk
 
 TOP       := tb
 DOTF      := tb_rv.f

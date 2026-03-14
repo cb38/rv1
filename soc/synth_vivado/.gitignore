@@ -1,0 +1,8 @@
+*.dcp
+*.log
+*.jou
+*.bit
+*.rpt
+*.txt
+.Xil
+filelist.tcl

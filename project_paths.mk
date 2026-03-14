@@ -2,6 +2,6 @@
 # e.g. tests referencing the HDL directory). This .mk file is
 # (eventually) included by every Makefile in the project.
 
-PROJ_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))/../..
+PROJ_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 HDL       := $(PROJ_ROOT)/hw/gen
 SCRIPTS   := $(PROJ_ROOT)/scripts

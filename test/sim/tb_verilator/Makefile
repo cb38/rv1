@@ -1,4 +1,4 @@
-include ../project_paths.mk
+include ../../../project_paths.mk
 
 TOP       := tb
 DOTF      := tb_rv.f
