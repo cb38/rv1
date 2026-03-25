@@ -120,7 +120,7 @@ DebugModule dm (
 	.io_core_csr_wr             (dbg_csr_wr),
 
 	.clk                        (clk),
-	.reset                      (~rst_n)
+	.resetn                     (rst_n)
 );
 
 RV cpu (
@@ -224,7 +224,7 @@ RV cpu (
 	.timer_irq                  (timer_irq[0]),
 	.soft_irq                   (soft_irq[0]),
 	.clk                        (clk),
-	.reset                      (~rst_n)
+	.resetn                     (rst_n)
 );
 
 endmodule

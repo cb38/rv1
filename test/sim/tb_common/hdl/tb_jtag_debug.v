@@ -79,7 +79,7 @@ JtagDTM dtm (
 	.io_dmi_resp_data  (dmi_resp_data),
 
 	.clk               (clk),
-	.reset             (~rst_n)
+	.resetn            (rst_n)
 );
 
 // Wires between DebugModule and RV core
@@ -116,7 +116,7 @@ DebugModule dm (
 	.io_core_csr_wr             (dbg_csr_wr),
 
 	.clk                        (clk),
-	.reset                      (~rst_n)
+	.resetn                     (rst_n)
 );
 
 RV cpu (
@@ -198,7 +198,7 @@ RV cpu (
 	.irq                        (irq),
 	.timer_irq                  (timer_irq[0]),
 	.clk                        (clk),
-	.reset                      (~rst_n)
+	.resetn                     (rst_n)
 );
 
 endmodule

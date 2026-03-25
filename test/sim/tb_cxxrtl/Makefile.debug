@@ -1,7 +1,7 @@
 # Build debug testbench for RV core + DebugModule
 # Usage: make -f Makefile.debug
 
-include ../project_paths.mk
+include ../../../project_paths.mk
 
 TOP       := tb
 DOTF      := tb_debug.f

@@ -1,6 +1,6 @@
 source filelist.tcl
 
-set PART xc7a100tcsg324-1
+set PART xc7s50csga324-1
 set TOP fpga
 
 proc checkpoint_and_report {stage} {
@@ -11,13 +11,13 @@ proc checkpoint_and_report {stage} {
 }
 
 add_files $FILES
-read_xdc constraints_timing.xdc
+read_xdc constraints_timing_s7.xdc
 
 synth_design -include_dirs $INCDIRS -part $PART -top $TOP \
 	-directive PerformanceOptimized
 checkpoint_and_report synth
 
-read_xdc constraints_io.xdc
+read_xdc constraints_io_s7.xdc
 place_design -directive Explore
 checkpoint_and_report place
 

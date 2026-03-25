@@ -455,6 +455,90 @@ class DebugModule extends Component {
 }
 
 object DebugModuleVerilog extends App {
-    val config = SpinalConfig(targetDirectory = "hw/gen")
+    val config = SpinalConfig(
+        targetDirectory = "hw/gen",
+        defaultConfigForClockDomains = ClockDomainConfig(resetActiveLevel = LOW)
+    )
     config.generateVerilog(new DebugModule).printPruned()
+}
+
+// ============================================================
+// APB → DmiBus bridge
+//
+// Adapts the APB master interface driven by hazard3_xilinx7_jtag_dtm
+// to the DebugModule's DmiBus slave interface.
+//
+// The DebugModule always responds in exactly 1 cycle
+//   (resp_valid = RegNext(req_valid))
+// so this bridge introduces exactly 1 APB wait state, which is
+// perfectly legal and expected.
+//
+// Address mapping:
+//   xilinx7_jtag_dtm drives paddr[8:2] with the 7-bit DMI word address
+//   and ties paddr[1:0] = 0, so: req_addr = paddr >> 2
+// ============================================================
+class ApbDmiBridge extends Component {
+    val io = new Bundle {
+        // APB slave side — driven by xilinx7_jtag_dtm
+        val psel    = in  Bool()
+        val penable = in  Bool()
+        val pwrite  = in  Bool()
+        val paddr   = in  UInt(9 bits)   // byte address; [8:2] = DMI word address
+        val pwdata  = in  Bits(32 bits)
+        val prdata  = out Bits(32 bits)
+        val pready  = out Bool()
+        val pslverr = out Bool()
+
+        // DmiBus master — connected to DebugModule
+        val dmi = master(DmiBus())
+    }
+
+    // Issue DMI request during APB ACCESS phase (PSEL=1 & PENABLE=1)
+    io.dmi.req_valid := io.psel && io.penable
+    io.dmi.req_addr  := io.paddr(8 downto 2)
+    io.dmi.req_data  := io.pwdata
+    io.dmi.req_op    := io.pwrite ? B"10" | B"01"
+
+    // DebugModule responds exactly 1 cycle after req_valid → becomes PREADY
+    io.prdata  := io.dmi.resp_data
+    io.pready  := io.dmi.resp_valid
+    io.pslverr := False
+}
+
+// ============================================================
+// BlackBox wrapper for hazard3_xilinx7_jtag_dtm
+//
+// Uses Xilinx 7-series BSCANE2 primitives to implement the JTAG TAP.
+// No external JTAG pins are required — JTAG access goes through the
+// FPGA's built-in JTAG chain (USER3/USER4 scan chains by default).
+//
+// Connect clk_dmi / rst_n_dmi to the system clock domain.
+// Connect the dmi_* APB ports to an ApbDmiBridge to reach DebugModule.
+// ============================================================
+class Xilinx7JtagDtm(
+    abits    : Int = 7,
+    wPaddr   : Int = 9,
+    idleHint : Int = 7
+) extends BlackBox {
+    val io = new Bundle {
+        val dmihardreset_req = out Bool()
+        val clk_dmi          = in  Bool()
+        val rst_n_dmi        = in  Bool()
+
+        // APB master interface — drive into ApbDmiBridge
+        val dmi_psel    = out Bool()
+        val dmi_penable = out Bool()
+        val dmi_pwrite  = out Bool()
+        val dmi_paddr   = out UInt(wPaddr bits)
+        val dmi_pwdata  = out Bits(32 bits)
+        val dmi_prdata  = in  Bits(32 bits)
+        val dmi_pready  = in  Bool()
+        val dmi_pslverr = in  Bool()
+    }
+
+    addGeneric("ABITS",           abits)
+    addGeneric("W_PADDR",         wPaddr)
+    addGeneric("DTMCS_IDLE_HINT", idleHint)
+    setDefinitionName("xilinx7_jtag_dtm")
+    noIoPrefix()
 }

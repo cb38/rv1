@@ -9,6 +9,7 @@ DOTF=$(PROJ_ROOT)soc/fpga/fpga_arty_s7.f
 CONSTRAINTS_IO=constraints_io_s7.xdc
 CONSTRAINTS_TIMING=constraints_timing_s7.xdc
 BITFILE=fpga_arty_s7.bit
+SYNTH_TCL=synth_s7.tcl
 else
 $(error Unknown BOARD: $(BOARD). Use  's7')
 endif
@@ -27,14 +28,14 @@ bit: $(BITFILE)
 s7:
 	$(MAKE) BOARD=s7 bit
 
-$(BITFILE): $(FILES) $(INCDIR) $(CONSTRAINTS_IO) $(CONSTRAINTS_TIMING) synth.tcl
+$(BITFILE): $(FILES) $(INCDIR) $(CONSTRAINTS_IO) $(CONSTRAINTS_TIMING) $(SYNTH_TCL)
 	@echo "Building for board: $(BOARD)"
 	@echo "set FILES {$(FILES)}" > filelist.tcl
 	@echo "set INCDIRS {$(INCDIRS)}" >> filelist.tcl
 	@echo "set CONSTRAINTS_IO {$(CONSTRAINTS_IO)}" >> filelist.tcl
 	@echo "set CONSTRAINTS_TIMING {$(CONSTRAINTS_TIMING)}" >> filelist.tcl
 	@echo "set BITFILE {$(BITFILE)}" >> filelist.tcl
-	vivado -mode batch -source synth.tcl 2>&1 | tee synth_$(BOARD).log
+	vivado -mode batch -source $(SYNTH_TCL) 2>&1 | tee synth_$(BOARD).log
 
 prog: $(BITFILE)
 	vivado -mode batch -source program.tcl

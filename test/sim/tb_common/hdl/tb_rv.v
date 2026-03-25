@@ -179,7 +179,7 @@ RV cpu (
 	.debug_csr_wr               (1'b0),
 
 	.clk                        (clk),
-	.reset                      (~rst_n)
+	.resetn                     (rst_n)
 );
 
 endmodule

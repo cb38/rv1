@@ -6,7 +6,7 @@ _start:
     lui x2, 32
     add x3, x1, x2
     add x4, x1, x2
-    addi x2, x0, 160
+    lui x2, 0x80001     # x2 = 0x80001000  (valid data area in 16 KiB memory)
     sw x4, 4(x2)
     sw x4, 0(x2)
     lw x5, 4(x2)

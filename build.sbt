@@ -3,8 +3,8 @@ ThisBuild / scalaVersion := "2.12.20"
 ThisBuild / organization := "org.example"
 
 val spinalVersion = "1.13.0"
-val spinalCore = "com.github.spinalhdl" %% "spinalhdl-core" % spinalVersion
-val spinalLib = "com.github.spinalhdl" %% "spinalhdl-lib" % spinalVersion
+val spinalCore = "com.github.spinalhdl" %% "spinalhdl-core" % spinalVersion withSources()
+val spinalLib = "com.github.spinalhdl" %% "spinalhdl-lib" % spinalVersion withSources()
 val spinalIdslPlugin = compilerPlugin("com.github.spinalhdl" %% "spinalhdl-idsl-plugin" % spinalVersion)
 
 lazy val rv = (project in file("."))

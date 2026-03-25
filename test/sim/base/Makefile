@@ -2,7 +2,7 @@ SRCS := main.S
 APP  := main
 
 CCFLAGS = -march=rv32i -mabi=ilp32 -Os -ffreestanding -nostdlib -nostartfiles
-LDSCRIPT = ../common/memmap_rv.ld
+LDSCRIPT = ../common/memmap.ld
 TBEXEC = ../tb_cxxrtl/tb_rv
 MAX_CYCLES ?= 100000
 TB_DEBUG ?= 0

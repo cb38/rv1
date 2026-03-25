@@ -1,7 +1,7 @@
 package multiport_memory
 import spinal.core._
 import spinal.lib._
-import spinal.lib.bus.amba4.axilite._
+import rv.bus.axi4lite._
 import spinal.sim._
 import spinal.core.sim._
 
@@ -120,7 +120,7 @@ class MultiPortMem_1w_2rs(config: MemConfig, readUnderWrite: ReadUnderWritePolic
 
 
 
-class AXI4Lite_Mem(axiLiteCfg: AxiLite4Config, config: MemConfig) extends Component
+class AXI4Lite_Mem(axiLiteCfg: Axi4LiteConfig, config: MemConfig) extends Component
 {
 
 
@@ -134,7 +134,7 @@ class AXI4Lite_Mem(axiLiteCfg: AxiLite4Config, config: MemConfig) extends Compon
     }
 
     val io = new Bundle {
-        val axi = slave(AxiLite4(axiLiteCfg))
+        val axi = slave(Axi4Lite(axiLiteCfg))
     }
 
     val mem = new Mem_1w_1rs(config, readUnderWrite = dontCare)
@@ -217,7 +217,7 @@ class AXI4Lite_Mem(axiLiteCfg: AxiLite4Config, config: MemConfig) extends Compon
     io.axi.r.resp  := B"00" // OKAY
 }
 
-class AXI4LiteReadOnly_Mem(axiLiteCfg: AxiLite4Config, config: MemConfig) extends Component
+class AXI4LiteReadOnly_Mem(axiLiteCfg: Axi4LiteConfig, config: MemConfig) extends Component
 {
 
 
@@ -231,7 +231,7 @@ class AXI4LiteReadOnly_Mem(axiLiteCfg: AxiLite4Config, config: MemConfig) extend
     }
 
     val io = new Bundle {
-        val axi = slave(AxiLite4ReadOnly(axiLiteCfg))
+        val axi = slave(Axi4LiteReadOnly(axiLiteCfg))
     }
 
     val mem = new Mem_1w_1rs(config, readUnderWrite = writeFirst)
@@ -251,4 +251,97 @@ class AXI4LiteReadOnly_Mem(axiLiteCfg: AxiLite4Config, config: MemConfig) extend
     io.axi.r.valid := RegNext(io.axi.ar.valid)
     io.axi.r.data  := mem.io.rd_data
     io.axi.r.resp  := B"00" // OKAY
+}
+
+/** Unified instruction + data memory.
+ *  io.instr_axi  - read-only AXI4Lite slave: CPU instruction fetch.
+ *  io.data_axi   - full AXI4Lite slave:      CPU data read/write AND
+ *                                             debugger code upload via JTAG.
+ *
+ *  Backed by MultiPortMem_1w_2rs (two physical banks, identical writes):
+ *    wr0  <- data_axi write channel
+ *    rd0  -> instr_axi read channel  (bank0)
+ *    rd1  -> data_axi  read channel  (bank1)
+ */
+class AXI4Lite_DualPort_Mem(axiLiteCfg: Axi4LiteConfig, config: MemConfig) extends Component {
+
+    private val bytesPerWord = axiLiteCfg.dataWidth / 8
+    private val addrLsb      = log2Up(bytesPerWord)
+
+    private def toWordAddress(addr: UInt): UInt =
+        if (addrLsb == 0) addr.resize(config.addrWidth)
+        else (addr >> addrLsb).resized
+
+    val io = new Bundle {
+        val instr_axi = slave(Axi4LiteReadOnly(axiLiteCfg))
+        val data_axi  = slave(Axi4Lite(axiLiteCfg))
+    }
+
+    val mem = new MultiPortMem_1w_2rs(config, readUnderWrite = dontCare)
+
+    // ── data_axi write channel → mem.wr0 ──────────────────────────────────
+    val awPending = RegInit(False)
+    val wPending  = RegInit(False)
+    val bValid    = RegInit(False)
+
+    val wrAddrReg = Reg(UInt(config.addrWidth bits)) init(0)
+    val wrDataReg = Reg(Bits(axiLiteCfg.dataWidth bits)) init(0)
+    val wrMaskReg = Reg(Bits(bytesPerWord bits)) init(0)
+
+    io.data_axi.aw.ready := !awPending
+    when(io.data_axi.aw.fire) {
+        wrAddrReg := toWordAddress(io.data_axi.aw.addr)
+        awPending := True
+    }
+
+    io.data_axi.w.ready := !wPending
+    when(io.data_axi.w.fire) {
+        wrDataReg := io.data_axi.w.data
+        wrMaskReg := io.data_axi.w.strb
+        wPending  := True
+    }
+
+    val writeFire = awPending && wPending && !bValid
+    when(writeFire) { awPending := False; wPending := False; bValid := True }
+
+    io.data_axi.b.valid := bValid
+    io.data_axi.b.resp  := B"00"
+    when(io.data_axi.b.fire) { bValid := False }
+
+    mem.io.wr0.ena  := writeFire
+    mem.io.wr0.addr := wrAddrReg
+    mem.io.wr0.data := wrDataReg
+    mem.io.wr0.mask := wrMaskReg
+
+    // ── instr_axi read channel → mem.rd0 ─────────────────────────────────
+    mem.io.rd0.ena  := io.instr_axi.ar.valid
+    mem.io.rd0.addr := toWordAddress(io.instr_axi.ar.addr)
+
+    io.instr_axi.ar.ready := True
+    io.instr_axi.r.valid  := RegNext(io.instr_axi.ar.valid)
+    io.instr_axi.r.data   := mem.io.rd0.data
+    io.instr_axi.r.resp   := B"00"
+
+    // ── data_axi read channel → mem.rd1 ──────────────────────────────────
+    val rdBusy     = RegInit(False)
+    val rdAddrReg  = Reg(UInt(config.addrWidth bits)) init(0)
+    val rdDataReg  = Reg(Bits(axiLiteCfg.dataWidth bits)) init(0)
+    val rdValidReg = RegInit(False)
+
+    io.data_axi.ar.ready := !rdBusy
+    val rdLaunch   = io.data_axi.ar.fire
+    val rdAddrNext = toWordAddress(io.data_axi.ar.addr)
+
+    when(rdLaunch)           { rdBusy := True; rdAddrReg := rdAddrNext }
+    when(io.data_axi.r.fire) { rdBusy := False; rdValidReg := False }
+
+    mem.io.rd1.ena  := rdLaunch
+    mem.io.rd1.addr := Mux(rdLaunch, rdAddrNext, rdAddrReg)
+
+    val rdLatency = RegNext(rdLaunch, init = False)
+    when(rdLatency) { rdDataReg := mem.io.rd1.data; rdValidReg := True }
+
+    io.data_axi.r.valid := rdValidReg
+    io.data_axi.r.data  := rdDataReg
+    io.data_axi.r.resp  := B"00"
 }

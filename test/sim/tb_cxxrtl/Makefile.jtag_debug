@@ -1,7 +1,7 @@
 # Build JTAG debug testbench for RV core + DebugModule + JtagDTM
 # Usage: make -f Makefile.jtag_debug
 
-include ../project_paths.mk
+include ../../../project_paths.mk
 
 TOP       := tb
 DOTF      := tb_jtag_debug.f

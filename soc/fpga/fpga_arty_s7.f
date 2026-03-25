@@ -4,6 +4,7 @@ file ../libfpga/common/fpga_reset.v
 file ../libfpga/common/blinky.v
 
 list ../soc/soc.f
+list ../libfpga/debug/jtag_dtm.f
 
 
 

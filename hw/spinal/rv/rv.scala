@@ -1,7 +1,7 @@
 package rv
 import spinal.core._
 import spinal.lib._ 
-import spinal.lib.bus.amba4.axilite._
+import rv.bus.axi4lite._
 import spinal.lib.fsm._
 import spinal.sim._
 import spinal.core.sim._
@@ -241,6 +241,7 @@ case class RVConfig(
                 supportFormal   : Boolean = false,
                 supportFence    : Boolean = false,
                 supportDebug    : Boolean = false,
+                useXilinxJtag   : Boolean = false,   // use BSCANE2 DTM instead of external JTAG pins
                 supportZbs      : Boolean = false,
                 supportZba      : Boolean = false,
                 supportZbb      : Boolean = false,
@@ -741,10 +742,8 @@ class DebugController(config: RVConfig, csrRegs: CsrRegFile, regMem: Mem[Bits], 
     // GPR read (combinational)
     debugIo.reg_rdata := Mux(debugIo.reg_addr === 0, B(0, 32 bits),
                              regMem.readAsync(debugIo.reg_addr))
-    // GPR write (when halted)
-    when(halted && debugIo.reg_wr && debugIo.reg_addr =/= 0) {
-        regMem.write(debugIo.reg_addr, debugIo.reg_wdata)
-    }
+    // GPR write: expose condition so the caller can merge into a single write port
+    val dbg_reg_wr_valid = halted && debugIo.reg_wr && debugIo.reg_addr =/= 0
 
     // CSR read/write via debug interface
     val debugCsrSel = csrRegs.addrToEnum(debugIo.csr_addr)
@@ -802,7 +801,7 @@ class DebugController(config: RVConfig, csrRegs: CsrRegFile, regMem: Mem[Bits], 
   *   0x14: mtime_hi    (R) */
 class CLINT(addressWidth: Int = 16) extends Component {
     val io = new Bundle {
-        val bus      = slave(AxiLite4(AxiLite4Config(addressWidth = addressWidth, dataWidth = 32)))
+        val bus      = slave(Axi4Lite(Axi4LiteConfig(addressWidth = addressWidth, dataWidth = 32)))
         val timerIrq = out Bool()
         val softIrq  = out Bool()
     }
@@ -818,7 +817,7 @@ class CLINT(addressWidth: Int = 16) extends Component {
     io.timerIrq := (mtime >= mtimecmp)
     io.softIrq  := msip
 
-    val busCtrl = new AxiLite4SlaveFactory(io.bus)
+    val busCtrl = new Axi4LiteSlaveFactory(io.bus)
     busCtrl.readAndWrite(msip,       address = 0x00, bitOffset = 0)
     busCtrl.readAndWrite(mtimecmpLo, address = 0x08)
     busCtrl.readAndWrite(mtimecmpHi, address = 0x0C)
@@ -832,33 +831,34 @@ class RV (config: RVConfig) extends Component {
   val f2d = StageLink(fetch.down, decode.up)
   val d2e = StageLink(decode.down, execute.up)
   // payload
-  val INSTRUCTION = Payload(Bits(32 bits))
+  val INSTRUCTION  = Payload(Bits(32 bits))
   val DECODED_INSTR = Payload(Bits(32 bits))  // decompressed instruction for execute
-  val PC = Payload(Bits(32 bits))
+  val PC            = Payload(Bits(32 bits))
+  val FETCH_BUS_ERR = Payload(Bool())           // instruction fetch returned AXI error (mcause=1)
   val rvfi = if (config.hasFormal) Payload(RVFI()) else null
   val rvfiOrder = if (config.hasFormal) Reg(UInt(64 bits)) init(0) else null
 
   // I/O
   val io = new Bundle {
-    val IO = out(UInt(32 bits)).simPublic()
+   
     val rvfi = if (config.hasFormal) out(Reg(RVFI()) init).setName("rvfi") else null
     //val exit = out(Reg(Bool)).init(False)
 
-    val instr_axi = master(AxiLite4ReadOnly(
-        AxiLite4Config(
+    val instr_axi = master(Axi4LiteReadOnly(
+        Axi4LiteConfig(
             addressWidth = config.InstAddrSize,
             dataWidth    = 32
         )
     )).setName("instr_axi")
 
-    val data_axi  = master(AxiLite4(
-        AxiLite4Config(
+    val data_axi  = master(Axi4Lite(
+        Axi4LiteConfig(
             addressWidth = config.dataAddrSize,
             dataWidth    = 32
         )
     )).setName("data_axi")
-    val periph_axi = if(!config.hasFormal) master(AxiLite4(
-        AxiLite4Config(
+    val periph_axi = if(!config.hasFormal) master(Axi4Lite(
+        Axi4LiteConfig(
             addressWidth = config.dataAddrSize,
             dataWidth    = 32
         )
@@ -904,7 +904,7 @@ class RV (config: RVConfig) extends Component {
     rs2 := RegMem.readAsync(rs2_rd_addr)
     rs1_data := Mux(rs1_rd_addr === 0, B(0, 32 bits), Mux(rd_wr && rs1_rd_addr === rd_wr_addr, rd_wr_data, rs1))
     rs2_data := Mux(rs2_rd_addr === 0, B(0, 32 bits), Mux(rd_wr && rs2_rd_addr === rd_wr_addr, rd_wr_data, rs2))
-    RegMem.write(rd_wr_addr, rd_wr_data, rd_wr)
+    // RegMem.write is called after dbg is created to allow merging into a single write port
   }
 
     val CsrRegs = new CsrRegFile(config)
@@ -913,33 +913,53 @@ class RV (config: RVConfig) extends Component {
     CsrRegs.mip(3)  := softIrqSync
 
     val dbg = if(config.hasDebug) new DebugController(config, CsrRegs, RegFile.RegMem, io.debug) else null
-  
- 
+
+    // Single merged register file write port — prevents multi-write-port RAM inference failure in Vivado
+    if(config.hasDebug) {
+      val dbg_wr = dbg.dbg_reg_wr_valid
+      RegFile.RegMem.write(
+        Mux(dbg_wr, io.debug.reg_addr,  RegFile.rd_wr_addr),
+        Mux(dbg_wr, io.debug.reg_wdata, RegFile.rd_wr_data),
+        RegFile.rd_wr || dbg_wr
+      )
+    } else {
+      RegFile.RegMem.write(RegFile.rd_wr_addr, RegFile.rd_wr_data, RegFile.rd_wr)
+    }
+
     //mem
     val dataMemory = new Area {
-        val readDone = Bool
-        val writeDone = Bool
-        val rdData   = Bits(32 bits)
-        val loadPending = RegInit(False) addAttribute("keep")
+        val readDone      = Bool
+        val writeDone     = Bool
+        val rdData        = Bits(32 bits)
+        val loadPending   = RegInit(False) addAttribute("keep")
         val writePending  = RegInit(False) addAttribute("keep")
+        // Combinatorial: asserted for exactly one cycle when an AXI error response fires
+        val loadBusError  = Bool()
+        val storeBusError = Bool()
 
         if(!config.hasFormal) {
             // Track which port is active for response routing
             val periphRead  = RegNextWhen(False, io.data_axi.r.fire || io.periph_axi.r.fire) init(False)
             val periphWrite = RegNextWhen(False, io.data_axi.b.fire || io.periph_axi.b.fire) init(False)
 
-            rdData   := Mux(periphRead, io.periph_axi.r.data, io.data_axi.r.data)
-            readDone := io.data_axi.r.fire || io.periph_axi.r.fire
+            rdData    := Mux(periphRead, io.periph_axi.r.data, io.data_axi.r.data)
+            readDone  := io.data_axi.r.fire || io.periph_axi.r.fire
             writeDone := io.data_axi.b.fire || io.periph_axi.b.fire
+            loadBusError  := (io.data_axi.r.fire  && (io.data_axi.r.resp  =/= B"00")) ||
+                             (io.periph_axi.r.fire && (io.periph_axi.r.resp =/= B"00"))
+            storeBusError := (io.data_axi.b.fire  && (io.data_axi.b.resp  =/= B"00")) ||
+                             (io.periph_axi.b.fire && (io.periph_axi.b.resp =/= B"00"))
             when(io.data_axi.r.fire || io.periph_axi.r.fire) { loadPending := False }
             when(io.data_axi.ar.fire || io.periph_axi.ar.fire) { loadPending := True }
             when(io.data_axi.w.fire || io.periph_axi.w.fire) { writePending := True }
             when(io.data_axi.b.fire || io.periph_axi.b.fire) { writePending := False }
         } else {
             // Formal mode: no peripheral bus, all accesses through data_axi
-            rdData   := io.data_axi.r.data
-            readDone := io.data_axi.r.fire
+            rdData    := io.data_axi.r.data
+            readDone  := io.data_axi.r.fire
             writeDone := io.data_axi.b.fire
+            loadBusError  := io.data_axi.r.fire && (io.data_axi.r.resp =/= B"00")
+            storeBusError := io.data_axi.b.fire && (io.data_axi.b.resp =/= B"00")
             when(io.data_axi.r.fire) { loadPending := False }
             when(io.data_axi.ar.fire) { loadPending := True }
             when(io.data_axi.w.fire) { writePending := True }
@@ -949,13 +969,11 @@ class RV (config: RVConfig) extends Component {
         // default values for data_axi
         io.data_axi.aw.valid := False
         io.data_axi.aw.addr  := 0
-        io.data_axi.aw.prot  := B"000"
         io.data_axi.w.valid  := False
         io.data_axi.w.data   := 0
         io.data_axi.w.strb   := 0
         io.data_axi.ar.valid := False
         io.data_axi.ar.addr  := 0
-        io.data_axi.ar.prot  := B"000"
         io.data_axi.b.ready  := True
         io.data_axi.r.ready  := True
 
@@ -963,13 +981,11 @@ class RV (config: RVConfig) extends Component {
             // default values for periph_axi
             io.periph_axi.aw.valid := False
             io.periph_axi.aw.addr  := 0
-            io.periph_axi.aw.prot  := B"000"
             io.periph_axi.w.valid  := False
             io.periph_axi.w.data   := 0
             io.periph_axi.w.strb   := 0
             io.periph_axi.ar.valid := False
             io.periph_axi.ar.addr  := 0
-            io.periph_axi.ar.prot  := B"000"
             io.periph_axi.b.ready  := True
             io.periph_axi.r.ready  := True
         }
@@ -1028,11 +1044,12 @@ class RV (config: RVConfig) extends Component {
   
         val loadPending = RegInit(False) addAttribute("keep")
 
-        val rdInst   = Reg(Bits(32 bits)) init(0)
-        val rdPc     = Reg(Bits(32 bits)) init(0)
-        val PcReg    = Reg(UInt(32 bits)) init(0)
-        val rdValid   = RegInit(False)
-        val loadDone = Bool()
+        val rdInst      = Reg(Bits(32 bits)) init(0)
+        val rdPc       = Reg(Bits(32 bits)) init(0)
+        val PcReg      = Reg(UInt(32 bits)) init(0)
+        val rdValid    = RegInit(False)
+        val fetchBusErr = RegInit(False)   // r.resp != 0 on the completed fetch
+        val loadDone   = Bool()
         val instrReqValid = Bool() addAttribute("keep")
 
         val pcFifo = new StreamFifo(UInt(32 bits), depth = 2,
@@ -1044,7 +1061,6 @@ class RV (config: RVConfig) extends Component {
         // default values
         io.instr_axi.ar.valid := False
         io.instr_axi.ar.addr  := 0
-        io.instr_axi.ar.prot  := B"000"
         io.instr_axi.r.ready  := True
 
         loadDone := io.instr_axi.r.fire
@@ -1053,9 +1069,8 @@ class RV (config: RVConfig) extends Component {
 
         def Fetch(addr: UInt) = {
             val wordAligned = addr(31 downto 2) @@ U"00"
-            io.instr_axi.ar.addr := wordAligned.resized
-            io.instr_axi.ar.valid  := /*!loadPending && */ instrReqValid && !flush
-            io.instr_axi.ar.prot  := B"000"
+            io.instr_axi.ar.addr  := wordAligned.resized
+            io.instr_axi.ar.valid := /*!loadPending && */ instrReqValid && !flush
             PcReg := wordAligned
         }
 
@@ -1070,19 +1085,21 @@ class RV (config: RVConfig) extends Component {
             rdValid      := False
         }
         when (loadDone && coreinit){
-            rdInst := io.instr_axi.r.data
-            rdPc   := pcFifo.io.pop.payload.asBits
-            //rdPc   := PcReg.asBits
-            rdValid := True
+            rdInst      := io.instr_axi.r.data
+            rdPc        := pcFifo.io.pop.payload.asBits
+            rdValid     := True
+            fetchBusErr := (io.instr_axi.r.resp =/= B"00")
         } otherwise {
-            rdValid := False    
+            rdValid     := False
+            fetchBusErr := False
         }
     }
   
     val fetcher = new fetch.Area {
         case class FetchPacket() extends Bundle {
-            val inst = Bits(32 bits)
-            val pc   = Bits(32 bits)
+            val inst   = Bits(32 bits)
+            val pc     = Bits(32 bits)
+            val busErr = Bool()   // AXI error on instruction fetch
         }
 
         val fetchFifo = new StreamFifo(FetchPacket(), depth = 4,
@@ -1102,10 +1119,11 @@ class RV (config: RVConfig) extends Component {
         when(io.instr_axi.ar.fire) {
             Iptr := (Iptr(31 downto 2) @@ U"00") + 4  // word-align before incrementing
         }
-        fetchFifo.io.push.valid          := instrMemory.rdValid
-        fetchFifo.io.push.payload.inst   := instrMemory.rdInst
-        fetchFifo.io.push.payload.pc     := instrMemory.rdPc
-        fetchFifo.io.flush               := flush
+        fetchFifo.io.push.valid             := instrMemory.rdValid
+        fetchFifo.io.push.payload.inst      := instrMemory.rdInst
+        fetchFifo.io.push.payload.pc        := instrMemory.rdPc
+        fetchFifo.io.push.payload.busErr    := instrMemory.fetchBusErr
+        fetchFifo.io.flush                  := flush
      
         val rvc = if(config.hasCompressed) new Area {
             val case2a = Bool() 
@@ -1118,8 +1136,9 @@ class RV (config: RVConfig) extends Component {
             val instr_hi_is_rvi = (hi(1 downto 0) === B"11") // 32b instruction
             val instr_lo_is_rvi = (lo(1 downto 0) === B"11") // 32b instruction
             val instr_push = Bits(32 bits)
-            val unaligned_lo = Reg(Bits(16 bits)) init(0)
-            val pc_unaligned = Reg(Bool()) init(False)
+            val unaligned_lo  = Reg(Bits(16 bits)) init(0)
+            val busErrSaved   = Reg(Bool())         init(False)  // busErr of the first half of a split 32b instr
+            val pc_unaligned  = Reg(Bool()) init(False)
             val instr32b_unaligned = Reg(Bool()) init(False)
             val instr16b_unaligned = Reg(Bool()) init(False)
             val savedPc = Reg(UInt(32 bits)) init(0)
@@ -1141,6 +1160,7 @@ class RV (config: RVConfig) extends Component {
                 // Only update unaligned_lo when pipeline advances,
                 // to avoid corruption during stalls (hi changes due to FIFO pop)
                 unaligned_lo := hi
+                busErrSaved  := fetchFifo.io.pop.payload.busErr
 
                 when (flushToHi) { // case 5: first word after flush to addr%4==2
                     // hi contains the target instruction; lo must be skipped.
@@ -1220,9 +1240,11 @@ class RV (config: RVConfig) extends Component {
                         + (flushHiAdj   ? U(2, 32 bits) | U(0, 32 bits)))
 
             // case 2b: instruction comes from register, valid even when FIFO is stopped
-            up.valid    := (fetchFifo.io.pop.valid || instr16b_unaligned) && !suppressValid
-            INSTRUCTION := instr_push
-            PC          := pc_push.asBits
+            up.valid      := (fetchFifo.io.pop.valid || instr16b_unaligned) && !suppressValid
+            INSTRUCTION   := instr_push
+            PC            := pc_push.asBits
+            // A split 32b instruction is in error if either half had a bad fetch response
+            FETCH_BUS_ERR := fetchFifo.io.pop.payload.busErr || (instr32b_unaligned && busErrSaved)
 
             when(flush) {
                 stopFetchFifo := False
@@ -1235,9 +1257,10 @@ class RV (config: RVConfig) extends Component {
         } else new Area {
             fetchFifo.io.pop.ready := down.ready
 
-            up.valid    := fetchFifo.io.pop.valid
-            INSTRUCTION := fetchFifo.io.pop.payload.inst
-            PC          := fetchFifo.io.pop.payload.pc
+            up.valid      := fetchFifo.io.pop.valid
+            INSTRUCTION   := fetchFifo.io.pop.payload.inst
+            PC            := fetchFifo.io.pop.payload.pc
+            FETCH_BUS_ERR := fetchFifo.io.pop.payload.busErr
         }
 
 
@@ -1761,11 +1784,55 @@ class RV (config: RVConfig) extends Component {
         }
             
     }
+    // -----------------------------------------------------------------------
+    // Synchronous bus-error exceptions
+    //   mcause = 1  Instruction access fault  (fetch returned r.resp != OKAY)
+    //   mcause = 5  Load access fault         (data read  returned r.resp != OKAY)
+    //   mcause = 7  Store/AMO access fault    (data write returned b.resp != OKAY)
+    //
+    // Priority: lower than external interrupts, higher than mret/jumps.
+    // Data errors fire while the faulting instruction is still in execute
+    // (haltWhen keeps it there until readDone/writeDone).
+    // Fetch errors are carried through the pipeline via FETCH_BUS_ERR.
+    // -----------------------------------------------------------------------
+    val busExc = new Area {
+        val instrBusError = FETCH_BUS_ERR && execute.isValid
+        val dataBusError  = dataMemory.loadBusError || dataMemory.storeBusError
+        val notDbgHalted  = if(config.hasDebug) !dbg.halted else True
+        val doTrap        = (instrBusError || dataBusError) && notDbgHalted
+
+        // mcause codes for synchronous exceptions (bit 31 = 0)
+        val causeInstrFetch = B(1,  32 bits)
+        val causeLoadFault  = B(5,  32 bits)
+        val causeStoreFault = B(7,  32 bits)
+        val trapCause = instrBusError ? causeInstrFetch |
+                        (dataMemory.loadBusError ? causeLoadFault | causeStoreFault)
+
+        val mtvec_base = (CsrRegs.mtvec(31 downto 2) ## B"00")
+
+        when(doTrap) {
+            CsrRegs.mepc   := pc.asBits   // faulting instruction PC
+            CsrRegs.mcause := trapCause
+            val excMstatus = Bits(32 bits)
+            excMstatus                  := CsrRegs.mstatus
+            excMstatus(7)               := CsrRegs.mstatus(3)   // MPIE = MIE
+            excMstatus(3)               := False                 // MIE  = 0
+            excMstatus(12 downto 11)    := B"11"                // MPP  = M-mode
+            CsrRegs.mstatus             := excMstatus
+        }
+    }
+
     when(irq.irq_taken){
         Iptr := irq.irq_target
         flush := True
         nextTrapPc := irq.irq_target
         if(config.hasCompressed) { flushTargetBit1 := irq.irq_target(1) }
+    } elsewhen(busExc.doTrap) {
+        val excTarget = busExc.mtvec_base.asUInt
+        Iptr       := excTarget
+        flush      := True
+        nextTrapPc := excTarget
+        if(config.hasCompressed) { flushTargetBit1 := excTarget(1) }
     } elsewhen(irq.mret_taken){
         Iptr := irq.mret_target
         flush := True
@@ -2099,7 +2166,7 @@ class RV (config: RVConfig) extends Component {
   }
     // pipeline
   Builder(fetch, decode, execute, f2d, d2e)
-  io.IO := 1
+
  
 }
 
