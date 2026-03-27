@@ -17,6 +17,9 @@ mem_io_state::mem_io_state(const tb_cli_args &args) {
 		reservation_addr[i] = 0;
 	}
 	poison_addr = -4u;
+	gpio_a_in = 0;
+	gpio_b_out = 0;
+	gpio_b_oe = 0;
 	mem = new uint8_t[MEM_SIZE];
 	for (size_t i = 0; i < MEM_SIZE; ++i)
 		mem[i] = 0;

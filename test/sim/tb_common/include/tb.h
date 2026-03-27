@@ -90,6 +90,10 @@ struct mem_io_state {
 	uint32_t reservation_addr[2];
 	uint32_t poison_addr;
 
+	uint32_t gpio_a_in;    // simulated GPIO-A input (button state)
+	uint32_t gpio_b_out;   // last value written to gpioB output register
+	uint32_t gpio_b_oe;    // last value written to gpioB output-enable register
+
 	uint8_t soft_irq_state;
 	uint32_t irq_state;
 

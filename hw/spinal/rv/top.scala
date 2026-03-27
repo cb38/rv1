@@ -96,8 +96,11 @@ class RVTop(config: RVConfig) extends Component {
         
         // -----------------------------------------------------------------------
         // Peripheral crossbar: periph_axi -> Axi4LiteDecoder -> slaves
-        //   outputs(0) -> CLINT       [0x0_0000..0x0_0FFF]
-        //   outputs(1) -> APB bridge  [0x1_0000..0x1_FFFF] -> APB3 slaves (UART, GPIO, etc.)
+        //   outputs(0) -> CLINT       [0x0200_0000..0x0200_0FFF]  (4 KiB)
+        //   outputs(1) -> APB bridge  [0x0201_0000..0x0201_FFFF]  (64 KiB) -> APB3 slaves:
+        //                               0x0201_0000..0x0201_0FFF  UART
+        //                               0x0201_1000..0x0201_1FFF  GPIO-A (buttons)
+        //                               0x0201_2000..0x0201_2FFF  GPIO-B (LEDs)
         // -----------------------------------------------------------------------
         val clint = new CLINT(config.dataAddrSize)
 
@@ -145,8 +148,8 @@ class RVTop(config: RVConfig) extends Component {
         val periphXbar = new Axi4LiteDecoder(
             axiConfig = Axi4LiteConfig(addressWidth = config.dataAddrSize, dataWidth = 32),
             addrMap   = Seq(
-                (BigInt(0x00000), BigInt(0x1000)),  // outputs(0): CLINT
-                (BigInt(0x10000), BigInt(0x10000))   // outputs(1): APB bridge -> UART
+                (BigInt("02000000", 16), BigInt(0x1000)),   // outputs(0): CLINT  at 0x0200_0000
+                (BigInt("02010000", 16), BigInt(0x10000))   // outputs(1): APB bridge at 0x0201_0000
             )
         )
         rv.io.periph_axi         <> periphXbar.io.input
@@ -257,102 +260,208 @@ object RVTopXilinxVerilog extends App {
                                                  bootVector = BigInt("80000040", 16)))).printPruned()
 }
 
-object RVSim extends App {
+// ─────────────────────────────────────────────────────────────────────────────
+// RVSim support: firmware build helpers and test-case definitions.
+//
+// RVSim simulates the FULL RVTop SoC (memory, CLINT, UART, GPIO) using
+// SpinalHDL simulation.  Unlike the cxxrtl/verilator testbenches, all
+// internal APB peripherals are live:
+//   0x0200_0000..0x0200_0FFF  CLINT
+//   0x0201_0000..0x0201_0FFF  UART
+//   0x0201_1000..0x0201_1FFF  gpioA / buttons
+//   0x0201_2000..0x0201_2FFF  gpioB / LEDs
+//
+// Usage:  sbt "runMain rv.RVSim [test]"
+//   test = "base"  (default)
+//   test = "fpga"
+// ─────────────────────────────────────────────────────────────────────────────
 
-  // Assemble and link test/sim/base/main.S
-  val baseDir = "test/sim/base"
-  val tmpDir  = s"$baseDir/tmp"
-  new File(tmpDir).mkdirs()
-  val ccFlags  = "-march=rv32i -mabi=ilp32 -Os -ffreestanding -nostdlib -nostartfiles -Wl,--no-warn-rwx-segments"
-  val ldScript = s"$baseDir/memmap_rv.ld"
-  val elfFile  = s"$tmpDir/main.elf"
-  val binFile  = s"$tmpDir/main.bin"
+/** Describes one firmware test: its source files, compile flags, and the
+  * simulation body to run after the binary has been loaded into SRAM.
+  *
+  * @param name     short identifier shown in log output
+  * @param srcs     source files relative to the workspace root (space-separated)
+  * @param ccFlags  riscv32-unknown-elf-gcc flags (arch, ABI, optimisation …)
+  * @param ldScript linker script path relative to workspace root
+  * @param simBody  simulation procedure; receives the elaborated DUT and the
+  *                 pre-loaded program image so it can inspect / drive I/Os
+  */
+case class RVSimTest(
+  name     : String,
+  srcs     : Seq[String],
+  ccFlags  : String,
+  ldScript : String,
+  simBody  : (RVTop, Array[BigInt]) => Unit
+)
 
-  val rc1 = s"riscv32-unknown-elf-gcc $ccFlags $baseDir/main.S -T $ldScript -o $elfFile".!
-  require(rc1 == 0, s"Assembly failed with exit code $rc1")
-  val rc2 = s"riscv32-unknown-elf-objcopy -O binary $elfFile $binFile".!
-  require(rc2 == 0, s"objcopy failed with exit code $rc2")
+/** Compile all sources for the given test into a flat binary.
+  * Returns the program as an array of 32-bit little-endian words. */
+object RVSimBuild {
 
-  // Load binary as array of 32-bit words (little-endian)
-  val binBytes = Files.readAllBytes(Paths.get(binFile))
-  val nWords   = (binBytes.length + 3) / 4
-  val program  = new Array[BigInt](nWords)
-  for (i <- 0 until nWords) {
-    var word = BigInt(0)
-    for (b <- 0 until 4) {
-      val idx = i * 4 + b
-      val byteVal = if (idx < binBytes.length) (binBytes(idx).toInt & 0xFF) else 0
-      word |= BigInt(byteVal) << (b * 8)
+  private val CC      = "riscv32-unknown-elf-gcc"
+  private val OBJCOPY = "riscv32-unknown-elf-objcopy"
+  private val INCDIR  = "test/sim/common"
+
+  def build(test: RVSimTest): Array[BigInt] = {
+    val tmpDir  = s"test/sim/${test.name}/tmp"
+    new File(tmpDir).mkdirs()
+    val elfFile = s"$tmpDir/${test.name}.elf"
+    val binFile = s"$tmpDir/${test.name}.bin"
+    val srcList = test.srcs.mkString(" ")
+
+    val rc1 = s"$CC ${test.ccFlags} -I $INCDIR $srcList -T ${test.ldScript} -o $elfFile".!
+    require(rc1 == 0, s"[${test.name}] Compilation failed (exit $rc1)")
+
+    val rc2 = s"$OBJCOPY -O binary $elfFile $binFile".!
+    require(rc2 == 0, s"[${test.name}] objcopy failed (exit $rc2)")
+
+    loadBin(test.name, binFile)
+  }
+
+  private def loadBin(name: String, binFile: String): Array[BigInt] = {
+    val bytes  = Files.readAllBytes(Paths.get(binFile))
+    val nWords = (bytes.length + 3) / 4
+    val words  = new Array[BigInt](nWords)
+    for (i <- 0 until nWords) {
+      var w = BigInt(0)
+      for (b <- 0 until 4) {
+        val idx = i * 4 + b
+        w |= BigInt(if (idx < bytes.length) bytes(idx).toInt & 0xFF else 0) << (b * 8)
+      }
+      words(i) = w
     }
-    program(i) = word
+    println(s"[$name] loaded $nWords words (${bytes.length} bytes) from $binFile")
+    words
   }
-  println(s"Loaded $nWords words from $binFile (${binBytes.length} bytes)")
-   
+}
 
-   SimConfig
-    .withFstWave
-   //withConfig(SpinalConfig(defaultConfigForClockDomains = ClockDomainConfig(resetActiveLevel = LOW)))
-    .compile(new RVTop(config = RVConfig(supportFormal = false,
-                                                 supportMulDiv = false,
-                                                 InstAddrSize = 32,
-                                                 dataAddrSize = 32,
-                                                 bootVector = BigInt("80000040", 16)) )).doSim{ dut =>
-  // MultiPortMem_1w_2rs has two physical banks kept in sync by identical writes.
-  // Pre-load both so instr_axi (bank0) and data_axi (bank1) see the program.
-  val memBank0 = dut.core.instrMem.mem.u_mem_bank0.u_mem
-  val memBank1 = dut.core.instrMem.mem.u_mem_bank1.u_mem
-  // Binary starts at _start (0x80000040), which maps to word offset 16 in memory
-  val memOffset = 16
-  // Clear all memory first
-  for (i <- 0 until 1024) {
-            memBank0.setBigInt(i, 0)
-            memBank1.setBigInt(i, 0)
-        }
-  // Load program at correct offset
-  for (i <- 0 until program.length) {
-            memBank0.setBigInt(memOffset + i, program(i))
-            memBank1.setBigInt(memOffset + i, program(i))
-        }
-  dut.clockDomain.forkStimulus(10)
-  dut.io.irq #= false
-  dut.io.timer_irq #= false
-  var run = 60
-  // init Regfile
-  for (j <- 0 until 32 ) {
-    dut.core.rv.RegFile.RegMem.setBigInt(j,0)
-    println()
+// ── Test catalogue ────────────────────────────────────────────────────────────
+
+object RVSimTests {
+
+  // Shared linker script used by all bare-metal tests
+  private val LD_RV = "test/sim/common/memmap_rv.ld"
+
+  // ── helpers ──────────────────────────────────────────────────────────────
+
+  /** Pre-load SRAM, reset registers, start the clock. */
+  def initDut(dut: RVTop, program: Array[BigInt]): Unit = {
+    val memBank0 = dut.core.instrMem.mem.u_mem_bank0.u_mem
+    val memBank1 = dut.core.instrMem.mem.u_mem_bank1.u_mem
+    val memOffset = 16   // 0x80000040 → word 16
+    for (i <- 0 until 4096) { memBank0.setBigInt(i, 0); memBank1.setBigInt(i, 0) }
+    for (i <- 0 until program.length) {
+      memBank0.setBigInt(memOffset + i, program(i))
+      memBank1.setBigInt(memOffset + i, program(i))
+    }
+    for (j <- 0 until 32) dut.core.rv.RegFile.RegMem.setBigInt(j, 0)
+    dut.clockDomain.forkStimulus(10)
+    dut.io.irq       #= false
+    dut.io.timer_irq #= false
   }
-  // run simulation and stop when instruction is 0
-   while(run>0 && (dut.core.rv.exec.instr.toBigInt != 0 ||  (dut.core.rv.decoder.pc.toBigInt & 0xFFFF) < 128)) {
+
+  // ── "base": register / memory dump after 60 instructions ─────────────────
+
+  val base = RVSimTest(
+    name    = "base",
+    srcs    = Seq("test/sim/base/main.S"),
+    ccFlags = "-march=rv32i -mabi=ilp32 -Os -ffreestanding -nostdlib -nostartfiles -Wl,--no-warn-rwx-segments",
+    ldScript = LD_RV,
+    simBody  = (dut, program) => {
+      initDut(dut, program)
+      var run = 60
+      while (run > 0 && (dut.core.rv.exec.instr.toBigInt != 0 ||
+                         (dut.core.rv.decoder.pc.toBigInt & 0xFFFFL) < 128)) {
         dut.clockDomain.waitSampling(1)
         run -= 1
-        if (dut.core.rv.exec.valid.toBoolean)  {
-             printf("PC: %08X, INST: %08X",dut.core.rv.exec.pc.toBigInt, dut.core.rv.exec.instr.toBigInt)
-             // print status of reg 0-7 
-                for (j <- 1 until 8 ) {
-                    printf(" x%02d: %08X  ", j,dut.core.rv.RegFile.RegMem.getBigInt(j))
-                }
-             println()
+        if (dut.core.rv.exec.valid.toBoolean) {
+          printf("PC: %08X, INST: %08X",
+            dut.core.rv.exec.pc.toBigInt, dut.core.rv.exec.instr.toBigInt)
+          for (j <- 1 until 8)
+            printf(" x%02d: %08X  ", j, dut.core.rv.RegFile.RegMem.getBigInt(j))
+          println()
         }
+      }
+      println("Regfile at end of simu:")
+      for (j <- 0 until 16 by 2) {
+        printf("  x%02d: %08X   x%02d: %08X\n", j,
+          dut.core.rv.RegFile.RegMem.getBigInt(j), j + 1,
+          dut.core.rv.RegFile.RegMem.getBigInt(j + 1))
+      }
+      val memBank0 = dut.core.instrMem.mem.u_mem_bank0.u_mem
+      
+      if ((dut.core.rv.RegFile.RegMem.getBigInt(1) & 0xFFFFFL) == 0)
+        println("[base] Test passed!")
+      else
+        println("[base] Test failed!")
     }
-  // read value from regfile
-  println("value of Regfile at the  end of simu") 
-  for (j <- 0 until 16 by 2) {
-    printf("x%02d:  %08X   x%02d:  %08X ", j,dut.core.rv.RegFile.RegMem.getBigInt(j),j+1,dut.core.rv.RegFile.RegMem.getBigInt(j+1))
-    println()
-  }
-  // read value from memory
-    println("value of memory at the  end of simu")
-    for (j <- 32 until 60 by 2) {
-        printf("mem[%02d]:  %08X   mem[%02d]:  %08X ", j,memBank0.getBigInt(j),j+1,memBank0.getBigInt(j+1))
-        println()  
+  )
+
+  // ── "fpga": GPIO blink — LED[2:3] blink while button[0] held ─────────────
+  // Phase 1: button released 400 cyc → led[3:2] must be 0
+  // Phase 2: button pressed 2000 cyc → led[3:2] must toggle (BLINK_CLOG2=2)
+  // Phase 3: button released 400 cyc → led[3:2] must return to 0
+
+  val fpga = RVSimTest(
+    name    = "fpga",
+    srcs    = Seq("test/sim/fpga/src/start.S", "test/sim/fpga/src/main.c"),
+    ccFlags = "-march=rv32im_zicsr -mabi=ilp32 -Os -ffreestanding -nostdlib -nostartfiles -Wl,--no-warn-rwx-segments",
+    ldScript = LD_RV,
+    simBody  = (dut, program) => {
+      initDut(dut, program)
+      dut.io.button.read #= 0
+
+      dut.clockDomain.waitSampling(400)
+      val ledsOff1 = (dut.io.led.write.toLong >> 2) & 3L
+      println(s"[fpga] Phase1 (btn=0, 400 cyc):  led[3:2] = ${ledsOff1.toBinaryString}  (expect 0)")
+
+      dut.io.button.read #= 1
+      var ledHi = 0L; var ledLo = 0L
+      for (_ <- 0 until 2000) {
+        dut.clockDomain.waitSampling(1)
+        val s = (dut.io.led.write.toLong >> 2) & 3L
+        if (s != 0L) ledHi += 1 else ledLo += 1
+      }
+      println(s"[fpga] Phase2 (btn=1, 2000 cyc): led[3:2] high=$ledHi cyc, low=$ledLo cyc")
+
+      dut.io.button.read #= 0
+      dut.clockDomain.waitSampling(400)
+      val ledsOff2 = (dut.io.led.write.toLong >> 2) & 3L
+      println(s"[fpga] Phase3 (btn=0, 400 cyc):  led[3:2] = ${ledsOff2.toBinaryString}  (expect 0)")
+
+      val blinkSeen = ledHi > 0 && ledLo > 0
+      val pass = (ledsOff1 == 0L) && blinkSeen && (ledsOff2 == 0L)
+      if (pass) println("[fpga] PASS — LEDs blinked while button pressed, off when released")
+      else      println(s"[fpga] FAIL — ledsOff1=$ledsOff1 blinkSeen=$blinkSeen ledsOff2=$ledsOff2")
     }
-        // check x1 is 0
-    if((dut.core.rv.RegFile.RegMem.getBigInt(1) & 0xFFFFF) == 0){
-        println("Test passed!")
-    } else {
-        println("Test failed!") 
-    }   
-    
- }
+  )
+
+  // ── Registry: add new RVSimTest entries here ──────────────────────────────
+  val all: Map[String, RVSimTest] = Seq(base, fpga).map(t => t.name -> t).toMap
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Entry point
+// Usage: sbt "runMain rv.RVSim [test]"
+// ─────────────────────────────────────────────────────────────────────────────
+object RVSim extends App {
+
+  val testName = if (args.nonEmpty) args(0) else "base"
+  val test     = RVSimTests.all.getOrElse(
+    testName,
+    { println(s"[RVSim] Unknown test '$testName'. Available: ${RVSimTests.all.keys.mkString(", ")}"); sys.exit(1) }
+  )
+  println(s"[RVSim] running test: $testName")
+
+  val program = RVSimBuild.build(test)
+
+  SimConfig
+    .withFstWave
+    .compile(new RVTop(config = RVConfig(
+        supportFormal = false,
+        supportMulDiv = false,
+        InstAddrSize  = 32,
+        dataAddrSize  = 32,
+        bootVector    = BigInt("80000040", 16))))
+    .doSim { dut => test.simBody(dut, program) }
 }

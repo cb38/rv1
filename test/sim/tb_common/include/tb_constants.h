@@ -22,6 +22,7 @@ enum {
 	IO_POISON_ADDR = 0x01c,
 	IO_SET_IRQ     = 0x020,
 	IO_CLR_IRQ     = 0x030,
+	IO_GPIO_A_IN   = 0x040,  // W: set simulated GPIO-A input state (button state for tests)
 	IO_MTIME       = 0x100,
 	IO_MTIMEH      = 0x104,
 	IO_MTIMECMP0   = 0x108,

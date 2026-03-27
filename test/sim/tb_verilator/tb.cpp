@@ -18,6 +18,18 @@ class tb_verilator_top: public tb_top {
 	uint64_t cycle = 0;
 
 	bool d_r_pending_valid = false;
+	private:
+	bool p_r_pending_valid = false;
+	uint32_t p_r_pending_data = 0;
+	uint32_t p_r_pending_resp = 0;
+
+	bool p_aw_pending = false;
+	uint32_t p_aw_addr = 0;
+	bool p_w_pending = false;
+	uint32_t p_w_data = 0;
+	uint32_t p_w_strb = 0;
+
+	public:
 	uint32_t d_r_pending_data = 0;
 	uint32_t d_r_pending_resp = 0;
 
@@ -64,7 +76,14 @@ tb_verilator_top::tb_verilator_top(const tb_cli_args &parsed_args, int argc, cha
 	top->d_axi_r_data = 0;
 	top->d_axi_r_resp = 0;
 
-	top->irq = false;
+	top->p_axi_aw_ready = true;
+	top->p_axi_w_ready = false;
+	top->p_axi_b_valid = false;
+	top->p_axi_b_resp = 0;
+	top->p_axi_ar_ready = true;
+	top->p_axi_r_valid = false;
+	top->p_axi_r_data = 0;
+	top->p_axi_r_resp = 0;
 	top->soft_irq = 0;
 	top->timer_irq = 0;
 
@@ -187,6 +206,68 @@ void tb_verilator_top::step(const tb_cli_args &args, mem_io_state &memio) {
 		w_pending = false;
 	} else if (top->d_axi_b_valid && top->d_axi_b_ready) {
 		top->d_axi_b_valid = false;
+	}
+
+	// Handle peripheral read AXI transactions
+	bool p_r_was_valid = top->p_axi_r_valid;
+	bool p_r_was_ready = top->p_axi_r_ready;
+	bool p_r_busy = p_r_pending_valid || p_r_was_valid;
+	top->p_axi_ar_ready = !p_r_busy;
+
+	if (p_r_was_valid && p_r_was_ready) {
+		top->p_axi_r_valid = false;
+	}
+	if (!p_r_was_valid && p_r_pending_valid) {
+		top->p_axi_r_valid = true;
+		top->p_axi_r_data = p_r_pending_data;
+		top->p_axi_r_resp = p_r_pending_resp;
+		p_r_pending_valid = false;
+	}
+	if (top->p_axi_ar_valid && top->p_axi_ar_ready) {
+		bus_request req;
+		req.addr = top->p_axi_ar_addr;
+		req.size = SIZE_WORD;
+		req.write = false;
+		req.excl = false;
+		req.reservation_id = 1;
+		bus_response resp = mem_callback_d(*this, memio, req);
+		p_r_pending_valid = true;
+		p_r_pending_data = resp.rdata;
+		p_r_pending_resp = resp.err ? 2u : 0u;
+	}
+
+	// Handle peripheral write AXI transactions
+	if (top->p_axi_aw_valid && top->p_axi_aw_ready) {
+		p_aw_pending = true;
+		p_aw_addr = top->p_axi_aw_addr;
+		top->p_axi_w_ready = true;
+	}
+	if (top->p_axi_w_valid && top->p_axi_w_ready) {
+		p_w_pending = true;
+		p_w_data = top->p_axi_w_data;
+		p_w_strb = top->p_axi_w_strb;
+	}
+	if (p_aw_pending && p_w_pending) {
+		bus_response merged_resp;
+		if (p_w_strb == 0xFu) {
+			bus_request req;
+			req.addr = p_aw_addr;
+			req.size = SIZE_WORD;
+			req.write = true;
+			req.excl = false;
+			req.reservation_id = 1;
+			req.wdata = p_w_data;
+			merged_resp = mem_callback_d(*this, memio, req);
+		} else {
+			merged_resp.err = true;
+		}
+		top->p_axi_b_valid = true;
+		top->p_axi_b_resp = merged_resp.err ? 2u : 0u;
+		top->p_axi_w_ready = false;
+		p_aw_pending = false;
+		p_w_pending = false;
+	} else if (top->p_axi_b_valid && top->p_axi_b_ready) {
+		top->p_axi_b_valid = false;
 	}
 
 	top->clk = true;

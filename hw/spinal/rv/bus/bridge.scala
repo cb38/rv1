@@ -159,10 +159,15 @@ class Axi4LiteDecoder(axiConfig: Axi4LiteConfig,
 
     io.input.w.ready := False
     for (i <- 0 until n) {
-        io.outputs(i).w.valid := io.input.w.valid && wSel(i) && wPending
+        // When an AW is already pending, route W via registered wSel.
+        // When no AW has been accepted yet, route W combinatorially via the
+        // current AW address so that AW and W can fire simultaneously into
+        // the downstream bridge (which requires both valid at the same time).
+        val wRouteI = Mux(wPending, wSel(i), slaveOf(io.input.aw.addr)(i))
+        io.outputs(i).w.valid := io.input.w.valid && wRouteI
         io.outputs(i).w.data  := io.input.w.data
         io.outputs(i).w.strb  := io.input.w.strb
-        when (wSel(i) && wPending) { io.input.w.ready := io.outputs(i).w.ready }
+        when (wRouteI) { io.input.w.ready := io.outputs(i).w.ready }
     }
 
     io.input.b.valid := False

@@ -939,8 +939,12 @@ class RV (config: RVConfig) extends Component {
 
         if(!config.hasFormal) {
             // Track which port is active for response routing
-            val periphRead  = RegNextWhen(False, io.data_axi.r.fire || io.periph_axi.r.fire) init(False)
-            val periphWrite = RegNextWhen(False, io.data_axi.b.fire || io.periph_axi.b.fire) init(False)
+            val periphRead  = RegInit(False)
+            val periphWrite = RegInit(False)
+            when(io.periph_axi.ar.fire)                              { periphRead  := True  }
+            when(io.data_axi.r.fire  || io.periph_axi.r.fire)       { periphRead  := False }
+            when(io.periph_axi.aw.fire)                              { periphWrite := True  }
+            when(io.data_axi.b.fire  || io.periph_axi.b.fire)       { periphWrite := False }
 
             rdData    := Mux(periphRead, io.periph_axi.r.data, io.data_axi.r.data)
             readDone  := io.data_axi.r.fire || io.periph_axi.r.fire
@@ -992,7 +996,7 @@ class RV (config: RVConfig) extends Component {
 
         def isPeriphAddr(addr: UInt): Bool = {
             if(config.hasFormal) False
-            else addr(31 downto 16) === U(0x0200, 16 bits)
+            else addr(31 downto 20) === U(0x020, 12 bits)  // covers 0x0200_0000..0x020F_FFFF
         }
 
         def WriteData(addr: UInt, data: Bits, size: Bits) = {
