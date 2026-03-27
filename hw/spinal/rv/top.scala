@@ -257,7 +257,9 @@ object RVTopXilinxVerilog extends App {
                                                  supportZbkb = true,
                                                  supportDebug = true,
                                                  useXilinxJtag = true,
-                                                 bootVector = BigInt("80000040", 16)))).printPruned()
+                                                 bootVector = BigInt("80000040", 16)))
+    .setDefinitionName("RVXilinxTop"))  // rename generated module/file here
+    .printPruned()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

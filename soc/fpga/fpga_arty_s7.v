@@ -101,7 +101,7 @@ fpga_reset #(
 	.rst_n       (rst_n_sys)
 );
 
-RVTop  soc_u (
+RVXilinxTop  soc_u (
 	.clk            (clk_sys),
 	.resetn          (rst_n_sys),
 

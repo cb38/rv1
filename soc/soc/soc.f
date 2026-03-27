@@ -1,6 +1,6 @@
 # SoC top level file
 
-file ../../hw/gen/RVTop.v
+file ../../hw/gen/RVXilinxTop.v
 
 # Generic SoC components from libfpga
 
