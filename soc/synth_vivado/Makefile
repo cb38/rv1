@@ -41,5 +41,5 @@ prog: $(BITFILE)
 	vivado -mode batch -source program.tcl
 
 clean:
-	rm -f *.dcp *.log *.jou *.bit *.rpt filelist.tcl
+	rm -f *.dcp *.log *.jou  *.rpt filelist.tcl
 	rm -rf .Xil

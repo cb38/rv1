@@ -730,6 +730,10 @@ case class DebugBus() extends Bundle {
     val csr_wdata  = in Bits(32 bits)
     val csr_rdata  = out Bits(32 bits)
     val csr_wr     = in Bool()
+    val dbg_exec_req   = in Bool()
+    val dbg_exec_instr = in Bits(32 bits)
+    val dbg_exec_done  = out Bool()
+    val dbg_exec_err   = out Bool()
 }
 
 class DebugController(config: RVConfig, csrRegs: CsrRegFile, regMem: Mem[Bits], debugIo: DebugBus) extends Area {
@@ -912,7 +916,26 @@ class RV (config: RVConfig) extends Component {
     CsrRegs.mip(7)  := timerIrqSync
     CsrRegs.mip(3)  := softIrqSync
 
-    val dbg = if(config.hasDebug) new DebugController(config, CsrRegs, RegFile.RegMem, io.debug) else null
+        val dbg = if(config.hasDebug) new DebugController(config, CsrRegs, RegFile.RegMem, io.debug) else null
+
+        val dbgExec = if(config.hasDebug) new Area {
+            io.debug.dbg_exec_done := False
+            io.debug.dbg_exec_err  := False
+
+            val injectPending = RegInit(False)
+            val inFlight      = RegInit(False)
+            val instr         = Reg(Bits(32 bits)) init(B(BigInt("00100073", 16), 32 bits))
+
+            when(!dbg.halted) {
+                injectPending := False
+                inFlight      := False
+            }
+
+            when(io.debug.dbg_exec_req && dbg.halted && !injectPending && !inFlight) {
+                instr         := io.debug.dbg_exec_instr
+                injectPending := True
+            }
+        } else null
 
     // Single merged register file write port — prevents multi-write-port RAM inference failure in Vivado
     if(config.hasDebug) {
@@ -1265,6 +1288,21 @@ class RV (config: RVConfig) extends Component {
             INSTRUCTION   := fetchFifo.io.pop.payload.inst
             PC            := fetchFifo.io.pop.payload.pc
             FETCH_BUS_ERR := fetchFifo.io.pop.payload.busErr
+        }
+
+        if(config.hasDebug) {
+            when(dbgExec.injectPending) {
+                instrMemory.instrReqValid := False
+                up.valid      := True
+                INSTRUCTION   := dbgExec.instr
+                PC            := CsrRegs.dpc
+                FETCH_BUS_ERR := False
+
+                when(down.ready) {
+                    dbgExec.injectPending := False
+                    dbgExec.inFlight      := True
+                }
+            }
         }
 
 
@@ -1857,6 +1895,16 @@ class RV (config: RVConfig) extends Component {
     if(config.hasDebug) {
         dbg.update(valid, isEbreak, isDret, pc.asBits, nextTrapPc, flush, Iptr, 
                    if(config.hasCompressed) flushTargetBit1 else null)
+
+        val dbgExecRetire = dbgExec.inFlight && execute.isValid && !flush &&
+                            (itype =/= InstrType.L || dataMemory.readDone || lsu.memMisaligned) &&
+                            (itype =/= InstrType.S || dataMemory.writeDone || lsu.memMisaligned)
+
+        when(dbgExecRetire) {
+            dbgExec.inFlight := False
+            io.debug.dbg_exec_done := True
+            io.debug.dbg_exec_err  := decoder.TRAP || lsu.memMisaligned || dataMemory.loadBusError || dataMemory.storeBusError
+        }
     }
 
     val execRetire = execute.isValid && !flush && !haltRequest && (!dataMemory.loadPending || dataMemory.readDone)

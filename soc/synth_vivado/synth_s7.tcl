@@ -25,4 +25,4 @@ route_design -directive Explore
 phys_opt_design -directive Explore
 checkpoint_and_report route
 
-write_bitstream -force fpga.bit
+write_bitstream -force $BITFILE

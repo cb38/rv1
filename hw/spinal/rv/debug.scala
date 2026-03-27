@@ -322,6 +322,10 @@ class DebugModule extends Component {
             val csr_wdata  = out Bits(32 bits)
             val csr_rdata  = in Bits(32 bits)
             val csr_wr     = out Bool()
+            val dbg_exec_req   = out Bool()
+            val dbg_exec_instr = out Bits(32 bits)
+            val dbg_exec_done  = in Bool()
+            val dbg_exec_err   = in Bool()
         }
     }
 
@@ -329,14 +333,25 @@ class DebugModule extends Component {
     val DMI_DATA0      = U(0x04, 7 bits)
     val DMI_DMCONTROL  = U(0x10, 7 bits)
     val DMI_DMSTATUS   = U(0x11, 7 bits)
+    val DMI_HARTINFO   = U(0x12, 7 bits)
     val DMI_ABSTRACTCS = U(0x16, 7 bits)
     val DMI_COMMAND    = U(0x17, 7 bits)
+    val DMI_ABSTRACTAUTO = U(0x18, 7 bits)
+    val DMI_PROGBUF0   = U(0x20, 7 bits)
+    val DMI_PROGBUF1   = U(0x21, 7 bits)
 
     // ---- DM registers ----
     val data0      = Reg(Bits(32 bits)) init(0)
     val dmactive   = RegInit(False)
     val haltreq    = RegInit(False)
     val cmderr     = Reg(UInt(3 bits)) init(0)
+    val abstractauto = Reg(Bits(32 bits)) init(0)
+    val progbuf0   = Reg(Bits(32 bits)) init(0)
+    val progbuf1   = Reg(Bits(32 bits)) init(B(BigInt("00100073", 16), 32 bits))
+    val cmdBusy    = RegInit(False)
+    val execPhase  = Reg(UInt(1 bits)) init(0)
+    val execSecond = RegInit(False)
+    val execWaitDone = RegInit(False)
 
     // Resume request: single-cycle pulse
     val resumeReq  = RegInit(False)
@@ -353,6 +368,8 @@ class DebugModule extends Component {
     io.core.csr_addr   := 0
     io.core.csr_wdata  := 0
     io.core.csr_wr     := False
+    io.core.dbg_exec_req   := False
+    io.core.dbg_exec_instr := 0
 
     // ---- dmstatus (read-only, constructed from core signals) ----
     val dmstatus = Bits(32 bits)
@@ -368,7 +385,12 @@ class DebugModule extends Component {
     val abstractcs = Bits(32 bits)
     abstractcs := 0
     abstractcs(3 downto 0)  := B"0001"         // datacount = 1
+    abstractcs(12)          := cmdBusy
+    abstractcs(28 downto 24):= B"00010"        // progbufsize = 2
     abstractcs(10 downto 8) := cmderr.asBits    // cmderr
+
+    val hartinfo = Bits(32 bits)
+    hartinfo := 0
 
     // ---- DMI read handling ----
     // Combinational read mux, output registered for clean timing
@@ -383,7 +405,11 @@ class DebugModule extends Component {
             is(DMI_DATA0)      { resp_data_comb := data0 }
             is(DMI_DMCONTROL)  { resp_data_comb := B(0, 31 bits) ## dmactive.asBits }
             is(DMI_DMSTATUS)   { resp_data_comb := dmstatus }
+            is(DMI_HARTINFO)   { resp_data_comb := hartinfo }
             is(DMI_ABSTRACTCS) { resp_data_comb := abstractcs }
+            is(DMI_ABSTRACTAUTO) { resp_data_comb := abstractauto }
+            is(DMI_PROGBUF0)   { resp_data_comb := progbuf0 }
+            is(DMI_PROGBUF1)   { resp_data_comb := progbuf1 }
         }
     }
 
@@ -409,22 +435,41 @@ class DebugModule extends Component {
                     cmderr := 0
                 }
             }
+            is(DMI_ABSTRACTAUTO) {
+                abstractauto := io.dmi.req_data
+            }
+            is(DMI_PROGBUF0) {
+                progbuf0 := io.dmi.req_data
+            }
+            is(DMI_PROGBUF1) {
+                progbuf1 := io.dmi.req_data
+            }
             is(DMI_COMMAND) {
                 // ---- Abstract command execution ----
                 val cmdtype  = io.dmi.req_data(31 downto 24)
                 val aarsize  = io.dmi.req_data(22 downto 20)
+                val postexec = io.dmi.req_data(18)
                 val transfer = io.dmi.req_data(17)
                 val write    = io.dmi.req_data(16)
                 val regno    = io.dmi.req_data(15 downto 0).asUInt
+                val commandError = Bool()
+                commandError := False
 
                 when(cmderr =/= 0) {
                     // Existing error, ignore command
+                    commandError := True
+                } elsewhen(cmdBusy) {
+                    cmderr := 1   // busy
+                    commandError := True
                 } elsewhen(cmdtype =/= 0) {
                     cmderr := 2   // not supported
+                    commandError := True
                 } elsewhen(aarsize =/= B"010") {
                     cmderr := 2   // only 32-bit supported
+                    commandError := True
                 } elsewhen(!io.core.halted) {
                     cmderr := 4   // halt/resume (core not halted)
+                    commandError := True
                 } elsewhen(transfer) {
                     when(regno >= 0x1000 && regno <= 0x101F) {
                         // ---- GPR access ----
@@ -446,11 +491,47 @@ class DebugModule extends Component {
                         }
                     } otherwise {
                         cmderr := 2   // not supported
+                        commandError := True
                     }
                 }
                 // If no transfer, command is a no-op (success)
+                when(postexec && !commandError) {
+                    cmdBusy      := True
+                    execPhase    := 0
+                    execSecond   := progbuf1 =/= B(0, 32 bits)
+                    execWaitDone := False
+                }
             }
         }
+    }
+
+    when(cmdBusy) {
+        when(!execWaitDone) {
+            io.core.dbg_exec_req   := True
+            io.core.dbg_exec_instr := (execPhase === 0) ? progbuf0 | progbuf1
+            execWaitDone := True
+        }
+
+        when(execWaitDone && io.core.dbg_exec_done) {
+            when(io.core.dbg_exec_err) {
+                cmderr := 3
+                cmdBusy := False
+                execWaitDone := False
+            } elsewhen(execPhase === 0 && execSecond) {
+                execPhase := 1
+                execWaitDone := False
+            } otherwise {
+                cmdBusy := False
+                execWaitDone := False
+            }
+        }
+    }
+
+    when(!dmactive) {
+        cmdBusy := False
+        execPhase := 0
+        execSecond := False
+        execWaitDone := False
     }
 }
 

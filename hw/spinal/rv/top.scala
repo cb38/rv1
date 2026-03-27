@@ -208,9 +208,13 @@ class RVTop(config: RVConfig) extends Component {
             rv.io.debug.csr_addr   := dbgMod.io.core.csr_addr
             rv.io.debug.csr_wdata  := dbgMod.io.core.csr_wdata
             rv.io.debug.csr_wr     := dbgMod.io.core.csr_wr
+            rv.io.debug.dbg_exec_req   := dbgMod.io.core.dbg_exec_req
+            rv.io.debug.dbg_exec_instr := dbgMod.io.core.dbg_exec_instr
             dbgMod.io.core.halted    := rv.io.debug.halted
             dbgMod.io.core.reg_rdata := rv.io.debug.reg_rdata
             dbgMod.io.core.csr_rdata := rv.io.debug.csr_rdata
+            dbgMod.io.core.dbg_exec_done := rv.io.debug.dbg_exec_done
+            dbgMod.io.core.dbg_exec_err  := rv.io.debug.dbg_exec_err
         }
     }
 }
