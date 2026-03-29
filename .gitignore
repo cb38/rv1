@@ -7,3 +7,4 @@ simWorkspace/
 hw/gen
 old/*
 tools/__*
+.DS_Store

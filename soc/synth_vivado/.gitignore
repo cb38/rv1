@@ -3,5 +3,6 @@
 *.jou
 *.rpt
 *.txt
+*.bit
 .Xil
 filelist.tcl
