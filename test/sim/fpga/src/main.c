@@ -32,8 +32,11 @@ typedef struct {
 #define mm_gpiob  ((gpio_t *)GPIOB_BASE)
 
 /* Blink divider (power of 2): toggle period = (1<<BLINK_CLOG2) loop iters.
- * 2 → very fast (good for simulation); 23 → ~0.5 Hz at 80 MHz on FPGA. */
-#define BLINK_CLOG2  23u
+ * 2 → very fast (good for simulation); 23 → ~0.5 Hz at 80 MHz on FPGA.
+ * Override at compile time with -DBLINK_CLOG2=2 for simulation. */
+#ifndef BLINK_CLOG2
+#define BLINK_CLOG2  20u
+#endif 
 
 int main(void)
 {
@@ -42,17 +45,21 @@ int main(void)
     mm_gpiob->out = 0u;
 
     uint32_t counter = 0u;
+
+    
+    // init led2 to on 
+    mm_gpiob->out = 15u;
     while (1) {
         if (mm_gpioa->val & 1u) {
             /* Button 0 pressed: blink LED 2 and 3 */
             counter++;
-            uint32_t blink = (counter >> BLINK_CLOG2) & 1u;
-            mm_gpiob->out = blink ? ((1u << 2) | (1u << 3)) : 0u;
+            uint32_t blink = ((counter ) >> BLINK_CLOG2) & 1u;
+            mm_gpiob->out = blink ? ((1u << 2) | (1u << 3) | (1u << 1) | (1u << 0)) : 0u;
             
         } else {
-            /* Button 0 released: LEDs off */
+            /* Button 0 released: LEDs on */
             counter = 0u;
-            mm_gpiob->out = 0u;
+            mm_gpiob->out = 15u;
         }
     }
     return 0;

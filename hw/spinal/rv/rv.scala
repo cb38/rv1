@@ -625,6 +625,12 @@ object RVDecode {
                     }
                 }
             }
+            // FENCE / FENCE.I — treated as NOP (no trap) even when hasFence=false.
+            // This ensures progbuf execution of fence.i by OpenOCD does not cause trap.
+            is(Opcodes.F) {
+                r.itype   := InstrType.FENCE
+                r.iformat := InstrFormat.I
+            }
             is(Opcodes.SYS){
                 when(funct3 === B"000"){
                     r.itype   := InstrType.E
@@ -737,8 +743,9 @@ case class DebugBus() extends Bundle {
 }
 
 class DebugController(config: RVConfig, csrRegs: CsrRegFile, regMem: Mem[Bits], debugIo: DebugBus) extends Area {
-    val halted = RegInit(False)
-    val mode   = RegInit(False)
+    val halted   = RegInit(False)
+    val mode     = RegInit(False)
+    val stepping = RegInit(False)  // single-step mode: halt after one instruction retires
 
     // Report halted status
     debugIo.halted := halted
@@ -761,11 +768,14 @@ class DebugController(config: RVConfig, csrRegs: CsrRegFile, regMem: Mem[Bits], 
     def update(valid: Bool, isEbreak: Bool, isDret: Bool,
                pc: Bits, nextTrapPc: UInt, flush: Bool, Iptr: UInt,
                flushTargetBit1: Bool = null): Unit = {
-        // External halt request – wait for pipeline idle (!valid) for clean halt
-        when(debugIo.halt_req && !halted && !valid) {
+        // External halt request – halt immediately even if an instruction is
+        // in-flight (e.g. a load/store stalled on the bus).  When valid=True
+        // we save the current PC so the instruction re-executes on resume;
+        // when valid=False we save nextTrapPc (the next instruction to fetch).
+        when(debugIo.halt_req && !halted) {
             halted := True
             mode   := True
-            csrRegs.dpc := nextTrapPc.asBits
+            csrRegs.dpc := Mux(!valid, nextTrapPc.asBits, pc)
             csrRegs.dcsr(8 downto 6) := B"011"  // cause = 3 (halt request)
             flush := True
         }
@@ -782,6 +792,7 @@ class DebugController(config: RVConfig, csrRegs: CsrRegFile, regMem: Mem[Bits], 
         when(debugIo.resume_req && halted) {
             halted := False
             mode   := False
+            stepping := csrRegs.dcsr(2)  // enable single-step if dcsr.step is set
             Iptr := csrRegs.dpc.asUInt
             flush := True
             if(flushTargetBit1 != null) { flushTargetBit1 := csrRegs.dpc(1) }
@@ -1793,7 +1804,9 @@ class RV (config: RVConfig) extends Component {
         // Priority: external > software > timer (per RISC-V privilege spec)
         val irqCauseValue = ext_irq_pending ? irqCauseExternal |
                             (soft_irq_pending ? irqCauseSoftware | irqCauseTimer)
-        val take_irq    = irq_pending && !valid && !(if(config.hasDebug) dbg.halted else False)
+        // Mask interrupts during single-step when dcsr.stepie=0 (RISC-V debug spec 4.9.1)
+        val stepSuppressIrq = if(config.hasDebug) (dbg.stepping && !CsrRegs.dcsr(11)) else False
+        val take_irq    = irq_pending && !valid && !(if(config.hasDebug) dbg.halted else False) && !stepSuppressIrq
         val mtvec_base  = (CsrRegs.mtvec(31 downto 2) ## B"00")
         val mtvec_mode  = CsrRegs.mtvec(1 downto 0)
         val isMret      = (itype === InstrType.E) && (instr(31 downto 20) === B"001100000010")
@@ -1892,8 +1905,12 @@ class RV (config: RVConfig) extends Component {
     val isDret   = if(config.hasDebug) (itype === InstrType.E) && (instr === B(BigInt("7B200073", 16), 32 bits)) else False
 
     // Debug halt / resume / ebreak / dret
+    // When a progbuf instruction is in-flight (dbgExec.inFlight), ebreak must NOT
+    // re-enter debug mode: it would set flush=True which prevents dbgExecRetire from
+    // firing, causing cmdBusy to stay stuck indefinitely (timeout).
     if(config.hasDebug) {
-        dbg.update(valid, isEbreak, isDret, pc.asBits, nextTrapPc, flush, Iptr, 
+        val isEbreakForDebug = isEbreak && !dbgExec.inFlight
+        dbg.update(valid, isEbreakForDebug, isDret, pc.asBits, nextTrapPc, flush, Iptr, 
                    if(config.hasCompressed) flushTargetBit1 else null)
 
         val dbgExecRetire = dbgExec.inFlight && execute.isValid && !flush &&
@@ -1904,6 +1921,34 @@ class RV (config: RVConfig) extends Component {
             dbgExec.inFlight := False
             io.debug.dbg_exec_done := True
             io.debug.dbg_exec_err  := decoder.TRAP || lsu.memMisaligned || dataMemory.loadBusError || dataMemory.storeBusError
+        }
+
+        // Single-step: halt after one instruction retires with cause = 4
+        // Condition: instruction completed (valid, load/store done), not progbuf,
+        //   not already halting from ebreak, and not an IRQ/exception stealing the cycle
+        val isEbreakToDebug = isEbreakForDebug && valid && (dbg.mode || CsrRegs.dcsr(15))
+        val stepRetire = dbg.stepping && execute.isValid &&
+            !dbgExec.inFlight && !isEbreakToDebug &&
+            !irq.irq_taken && !busExc.doTrap &&
+            (itype =/= InstrType.L || dataMemory.readDone || lsu.memMisaligned) &&
+            (itype =/= InstrType.S || dataMemory.writeDone || lsu.memMisaligned)
+
+        when(stepRetire) {
+            dbg.halted   := True
+            dbg.mode     := True
+            dbg.stepping := False
+            CsrRegs.dcsr(8 downto 6) := B"100"  // cause = 4 (step)
+            // dpc = address of the next instruction that would execute
+            val stepDpc = UInt(32 bits)
+            when(jump.take_jump) {
+                stepDpc := jump.pc_jump
+            } elsewhen(irq.mret_taken) {
+                stepDpc := irq.mret_target
+            } otherwise {
+                stepDpc := pc + instrStep
+            }
+            CsrRegs.dpc := stepDpc.asBits
+            flush := True
         }
     }
 

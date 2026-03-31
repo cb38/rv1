@@ -339,6 +339,8 @@ class DebugModule extends Component {
     val DMI_ABSTRACTAUTO = U(0x18, 7 bits)
     val DMI_PROGBUF0   = U(0x20, 7 bits)
     val DMI_PROGBUF1   = U(0x21, 7 bits)
+    val DMI_PROGBUF2   = U(0x22, 7 bits)
+    val DMI_PROGBUF3   = U(0x23, 7 bits)
 
     // ---- DM registers ----
     val data0      = Reg(Bits(32 bits)) init(0)
@@ -346,16 +348,31 @@ class DebugModule extends Component {
     val haltreq    = RegInit(False)
     val cmderr     = Reg(UInt(3 bits)) init(0)
     val abstractauto = Reg(Bits(32 bits)) init(0)
-    val progbuf0   = Reg(Bits(32 bits)) init(0)
-    val progbuf1   = Reg(Bits(32 bits)) init(B(BigInt("00100073", 16), 32 bits))
-    val cmdBusy    = RegInit(False)
-    val execPhase  = Reg(UInt(1 bits)) init(0)
-    val execSecond = RegInit(False)
+    // progbuf[0..3] : 4 registres 32 bits (progbufsize=4)
+    val progbuf      = Vec.fill(4)(Reg(Bits(32 bits)))
+    progbuf.foreach(_ init(0))
+    val cmdBusy      = RegInit(False)
+    val execPhase    = Reg(UInt(2 bits)) init(0)   // 0..3
     val execWaitDone = RegInit(False)
+
+    // Saved last command for abstractauto re-execution
+    val savedCommand = Reg(Bits(32 bits)) init(0)
+    val autoexecTrigger = RegInit(False)
+    autoexecTrigger := False   // single-cycle pulse, set below
 
     // Resume request: single-cycle pulse
     val resumeReq  = RegInit(False)
     resumeReq := False   // auto-clear each cycle
+
+    // Track dmcontrol.resumereq persistently for resumeack handshake
+    val dmcontrolResumereq = RegInit(False)
+    val resumeAck = RegInit(False)
+    when(dmcontrolResumereq && !io.core.halted) {
+        resumeAck := True
+    }
+    when(!dmcontrolResumereq) {
+        resumeAck := False
+    }
 
     // Drive core signals
     io.core.halt_req   := haltreq
@@ -377,16 +394,18 @@ class DebugModule extends Component {
     dmstatus(3 downto 0) := B"0010"            // version = 2 (0.13)
     dmstatus(9)          := io.core.halted      // allhalted
     dmstatus(8)          := io.core.halted      // anyhalted
-    dmstatus(5)          := !io.core.halted     // allrunning
-    dmstatus(4)          := !io.core.halted     // anyrunning
+    dmstatus(11)         := !io.core.halted     // allrunning  (spec 0.13 bit 11)
+    dmstatus(10)         := !io.core.halted     // anyrunning  (spec 0.13 bit 10)
     dmstatus(7)          := True                // authenticated (always)
+    dmstatus(17)         := resumeAck           // allresumeack (spec 0.13 bit 17)
+    dmstatus(16)         := resumeAck           // anyresumeack (spec 0.13 bit 16)
 
     // ---- abstractcs (partially read-only) ----
     val abstractcs = Bits(32 bits)
     abstractcs := 0
     abstractcs(3 downto 0)  := B"0001"         // datacount = 1
     abstractcs(12)          := cmdBusy
-    abstractcs(28 downto 24):= B"00010"        // progbufsize = 2
+    abstractcs(28 downto 24):= B"00100"        // progbufsize = 4
     abstractcs(10 downto 8) := cmderr.asBits    // cmderr
 
     val hartinfo = Bits(32 bits)
@@ -397,8 +416,15 @@ class DebugModule extends Component {
     val resp_data_comb = Bits(32 bits)
     resp_data_comb := 0
 
-    val dmi_is_read  = io.dmi.req_valid && io.dmi.req_op === B"01"
-    val dmi_is_write = io.dmi.req_valid && io.dmi.req_op === B"10"
+    // Gate reads/writes to fire only on the FIRST cycle of req_valid.
+    // The APB bridge (and standalone DTM) hold req_valid high for 2 system
+    // clock cycles.  Without this guard the DM would process every write
+    // twice — harmless for plain registers but fatal for the command
+    // register: the first cycle sets cmdBusy (postexec), the second cycle
+    // sees cmdBusy=True and raises cmderr=busy.
+    val dmi_req_prev = RegNext(io.dmi.req_valid, init = False)
+    val dmi_is_read  = io.dmi.req_valid && !dmi_req_prev && io.dmi.req_op === B"01"
+    val dmi_is_write = io.dmi.req_valid && !dmi_req_prev && io.dmi.req_op === B"10"
 
     when(dmi_is_read) {
         switch(io.dmi.req_addr) {
@@ -408,12 +434,14 @@ class DebugModule extends Component {
             is(DMI_HARTINFO)   { resp_data_comb := hartinfo }
             is(DMI_ABSTRACTCS) { resp_data_comb := abstractcs }
             is(DMI_ABSTRACTAUTO) { resp_data_comb := abstractauto }
-            is(DMI_PROGBUF0)   { resp_data_comb := progbuf0 }
-            is(DMI_PROGBUF1)   { resp_data_comb := progbuf1 }
+            is(DMI_PROGBUF0)   { resp_data_comb := progbuf(0) }
+            is(DMI_PROGBUF1)   { resp_data_comb := progbuf(1) }
+            is(DMI_PROGBUF2)   { resp_data_comb := progbuf(2) }
+            is(DMI_PROGBUF3)   { resp_data_comb := progbuf(3) }
         }
     }
 
-    io.dmi.resp_valid := RegNext(io.dmi.req_valid) init(False)
+    io.dmi.resp_valid := dmi_req_prev
     io.dmi.resp_data  := RegNext(resp_data_comb)   init(0)
 
     // ---- DMI write handling ----
@@ -421,10 +449,15 @@ class DebugModule extends Component {
         switch(io.dmi.req_addr) {
             is(DMI_DATA0) {
                 data0 := io.dmi.req_data
+                // abstractauto: autoexecdata[0] triggers re-execution
+                when(abstractauto(0) && !cmdBusy && cmderr === 0) {
+                    autoexecTrigger := True
+                }
             }
             is(DMI_DMCONTROL) {
                 dmactive := io.dmi.req_data(0)
                 haltreq  := io.dmi.req_data(31)
+                dmcontrolResumereq := io.dmi.req_data(30)
                 when(io.dmi.req_data(30)) {
                     resumeReq := True
                 }
@@ -438,77 +471,87 @@ class DebugModule extends Component {
             is(DMI_ABSTRACTAUTO) {
                 abstractauto := io.dmi.req_data
             }
-            is(DMI_PROGBUF0) {
-                progbuf0 := io.dmi.req_data
-            }
-            is(DMI_PROGBUF1) {
-                progbuf1 := io.dmi.req_data
-            }
+            is(DMI_PROGBUF0) { progbuf(0) := io.dmi.req_data }
+            is(DMI_PROGBUF1) { progbuf(1) := io.dmi.req_data }
+            is(DMI_PROGBUF2) { progbuf(2) := io.dmi.req_data }
+            is(DMI_PROGBUF3) { progbuf(3) := io.dmi.req_data }
             is(DMI_COMMAND) {
-                // ---- Abstract command execution ----
-                val cmdtype  = io.dmi.req_data(31 downto 24)
-                val aarsize  = io.dmi.req_data(22 downto 20)
-                val postexec = io.dmi.req_data(18)
-                val transfer = io.dmi.req_data(17)
-                val write    = io.dmi.req_data(16)
-                val regno    = io.dmi.req_data(15 downto 0).asUInt
-                val commandError = Bool()
-                commandError := False
-
-                when(cmderr =/= 0) {
-                    // Existing error, ignore command
-                    commandError := True
-                } elsewhen(cmdBusy) {
-                    cmderr := 1   // busy
-                    commandError := True
-                } elsewhen(cmdtype =/= 0) {
-                    cmderr := 2   // not supported
-                    commandError := True
-                } elsewhen(aarsize =/= B"010") {
-                    cmderr := 2   // only 32-bit supported
-                    commandError := True
-                } elsewhen(!io.core.halted) {
-                    cmderr := 4   // halt/resume (core not halted)
-                    commandError := True
-                } elsewhen(transfer) {
-                    when(regno >= 0x1000 && regno <= 0x101F) {
-                        // ---- GPR access ----
-                        io.core.reg_addr := (regno - 0x1000).resize(5)
-                        when(write) {
-                            io.core.reg_wdata := data0
-                            io.core.reg_wr    := True
-                        } otherwise {
-                            data0 := io.core.reg_rdata
-                        }
-                    } elsewhen(regno < 0x1000) {
-                        // ---- CSR access ----
-                        io.core.csr_addr := regno.resize(12)
-                        when(write) {
-                            io.core.csr_wdata := data0
-                            io.core.csr_wr    := True
-                        } otherwise {
-                            data0 := io.core.csr_rdata
-                        }
-                    } otherwise {
-                        cmderr := 2   // not supported
-                        commandError := True
-                    }
-                }
-                // If no transfer, command is a no-op (success)
-                when(postexec && !commandError) {
-                    cmdBusy      := True
-                    execPhase    := 0
-                    execSecond   := progbuf1 =/= B(0, 32 bits)
-                    execWaitDone := False
-                }
+                savedCommand := io.dmi.req_data
             }
         }
     }
 
+    // ---- Abstract command execution (shared between DMI_COMMAND write and autoexec) ----
+    val cmdExec    = Bool()
+    val cmdData    = Bits(32 bits)
+    val dmiCmdWrite = dmi_is_write && io.dmi.req_addr === DMI_COMMAND
+    cmdExec := dmiCmdWrite || autoexecTrigger
+    cmdData := dmiCmdWrite ? io.dmi.req_data | savedCommand
+
+    when(cmdExec) {
+        val cmdtype  = cmdData(31 downto 24)
+        val aarsize  = cmdData(22 downto 20)
+        val postexec = cmdData(18)
+        val transfer = cmdData(17)
+        val write    = cmdData(16)
+        val regno    = cmdData(15 downto 0).asUInt
+        val commandError = Bool()
+        commandError := False
+
+        // Save command for autoexec re-use
+        when(dmiCmdWrite) {
+            savedCommand := io.dmi.req_data
+        }
+
+        when(cmderr =/= 0) {
+            commandError := True
+        } elsewhen(cmdBusy) {
+            cmderr := 1   // busy
+            commandError := True
+        } elsewhen(cmdtype =/= 0) {
+            cmderr := 2   // not supported
+            commandError := True
+        } elsewhen(!io.core.halted) {
+            cmderr := 4   // halt/resume (core not halted)
+            commandError := True
+        } elsewhen(transfer) {
+            when(aarsize =/= B"010") {
+                cmderr := 2   // only 32-bit supported
+                commandError := True
+            } elsewhen(regno >= 0x1000 && regno <= 0x101F) {
+                io.core.reg_addr := (regno - 0x1000).resize(5)
+                when(write) {
+                    io.core.reg_wdata := data0
+                    io.core.reg_wr    := True
+                } otherwise {
+                    data0 := io.core.reg_rdata
+                }
+            } elsewhen(regno < 0x1000) {
+                io.core.csr_addr := regno.resize(12)
+                when(write) {
+                    io.core.csr_wdata := data0
+                    io.core.csr_wr    := True
+                } otherwise {
+                    data0 := io.core.csr_rdata
+                }
+            } otherwise {
+                cmderr := 2   // not supported
+                commandError := True
+            }
+        }
+        when(postexec && !commandError) {
+            cmdBusy      := True
+            execPhase    := 0
+            execWaitDone := False
+        }
+    }
+    // Dummy switch closure removed — logic is now outside the DMI write switch
+
+    // Exécution séquentielle progbuf[0..3] : on s'arrête dès qu'on atteint ebreak (0x00100073) ou la fin du tableau
     when(cmdBusy) {
         when(!execWaitDone) {
             io.core.dbg_exec_req   := True
-            io.core.dbg_exec_instr := (execPhase === 0) ? progbuf0 | progbuf1
+            io.core.dbg_exec_instr := progbuf(execPhase)
             execWaitDone := True
         }
 
@@ -517,8 +560,12 @@ class DebugModule extends Component {
                 cmderr := 3
                 cmdBusy := False
                 execWaitDone := False
-            } elsewhen(execPhase === 0 && execSecond) {
-                execPhase := 1
+            } elsewhen(progbuf(execPhase) === B(BigInt("00100073", 16), 32 bits)) {
+                // ebreak atteint : fin d'exécution
+                cmdBusy := False
+                execWaitDone := False
+            } elsewhen(execPhase =/= U(3, 2 bits)) {
+                execPhase    := execPhase + 1
                 execWaitDone := False
             } otherwise {
                 cmdBusy := False
@@ -530,7 +577,6 @@ class DebugModule extends Component {
     when(!dmactive) {
         cmdBusy := False
         execPhase := 0
-        execSecond := False
         execWaitDone := False
     }
 }

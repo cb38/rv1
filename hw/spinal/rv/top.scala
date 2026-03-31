@@ -237,6 +237,7 @@ object RVTopVerilog extends App {
                                                  supportZbb = true,
                                                  supportZbkb = true,
                                                  supportDebug = true,
+                                                 supportCompressed = true,
                                                  bootVector = BigInt("00000000", 16)))).printPruned()
 }
 
@@ -261,6 +262,7 @@ object RVTopXilinxVerilog extends App {
                                                  supportZbkb = true,
                                                  supportDebug = true,
                                                  useXilinxJtag = true,
+                                                 supportCompressed = true,
                                                  bootVector = BigInt("80000040", 16)))
     .setDefinitionName("RVXilinxTop"))  // rename generated module/file here
     .printPruned()
@@ -411,7 +413,7 @@ object RVSimTests {
   val fpga = RVSimTest(
     name    = "fpga",
     srcs    = Seq("test/sim/fpga/src/start.S", "test/sim/fpga/src/main.c"),
-    ccFlags = "-march=rv32im_zicsr -mabi=ilp32 -Os -ffreestanding -nostdlib -nostartfiles -Wl,--no-warn-rwx-segments",
+    ccFlags = "-march=rv32im_zicsr -mabi=ilp32 -Os -ffreestanding -nostdlib -nostartfiles -Wl,--no-warn-rwx-segments -DBLINK_CLOG2=2",
     ldScript = LD_RV,
     simBody  = (dut, program) => {
       initDut(dut, program)

@@ -7,12 +7,11 @@
 #   sim-tb         - build cxxrtl testbench only
 #   fpga-sim       - run fpga GPIO blink test in SpinalHDL simulator (RVSim)
 #   synth          - synthesise + place & route for Arty S7 (bitfile)
-#   prog           - program Arty S7 via JTAG
 #   formal         - run riscv-formal checks
 #   clean          - clean generated/build artefacts
 #   help           - print this message
 
-.PHONY: all rtl sim sim-tests sim-tb fpga-sim synth prog formal clean help
+.PHONY: all rtl sim sim-tests sim-tb fpga-sim fpga-fw synth formal clean help load_fpga connect_fpga
 
 # ── defaults ──────────────────────────────────────────────────────────────────
 BOARD      ?= s7
@@ -50,12 +49,18 @@ SIM_TEST ?= fpga
 fpga-sim:
 	sbt "runMain rv.RVSim $(SIM_TEST)"
 
+# ── FPGA firmware build ──────────────────────────────────────────────────────
+# Compile the bare-metal firmware for the real FPGA (BLINK_CLOG2=23).
+# Pass DEBUG=1 for GDB-friendly build (-g -Og).
+# Output: test/sim/fpga/tmp/fpga.elf, .bin, .dis
+fpga-fw:
+	$(MAKE) -C test/sim/fpga clean
+	$(MAKE) -C test/sim/fpga bin $(if $(DEBUG),DEBUG=$(DEBUG),)
+
 # ── FPGA synthesis / implementation ──────────────────────────────────────────
 synth: rtl_fpga
 	$(MAKE) -C soc/synth_vivado BOARD=$(BOARD) bit
 
-prog:
-	$(MAKE) -C soc/synth_vivado BOARD=$(BOARD) prog
 
 # ── Formal verification ───────────────────────────────────────────────────────
 formal: rtl
@@ -64,6 +69,7 @@ formal: rtl
 # ── Clean ─────────────────────────────────────────────────────────────────────
 clean:
 	$(MAKE) -C test/sim          clean
+	$(MAKE) -C test/sim/fpga          clean
 	$(MAKE) -C test/sim/tb_cxxrtl clean
 	$(MAKE) -C soc/synth_vivado  clean
 	$(MAKE) -C test/formal/riscv-formal/riscv-formal/cores/RV clean
@@ -77,9 +83,22 @@ help:
 	@echo "  make sim-tests         Run all cxxrtl sim tests (TB already built)"
 	@echo "  make sim-test TEST=X   Run a single cxxrtl test (e.g. hellow)"
 	@echo "  make fpga-sim          Run full-SoC SpinalHDL sim (SIM_TEST=fpga)"
-	@echo "  make fpga-sim SIM_TEST=base"
+	@echo "  make fpga-fw           Compile FPGA firmware (test/sim/fpga/tmp/fpga.elf)"
+	@echo "  make fpga-fw DEBUG=1   … with debug symbols (-g -Og)"
 	@echo "  make synth [BOARD=s7]  Vivado synthesis + impl (produces bitfile)"
-	@echo "  make prog  [BOARD=s7]  Program FPGA via JTAG"
 	@echo "  make formal            riscv-formal instruction checks"
 	@echo "  make clean             Remove all build artefacts"
+	@echo "  make connect_fpga      Connect to FPGA via OpenOCD (JTAG)"
+	@echo "  make gdb_fpga          Connect GDB to FPGA via OpenOCD"
 	@echo ""
+.PHONY: load_fpga
+
+load_fpga:
+	openocd -f soc/prog/7series.txt
+
+connect_fpga:
+	openocd -f soc/artys7-openocd.cfg
+
+gdb_fpga:
+	riscv64-unknown-elf-gdb -x commands.gdb	
+

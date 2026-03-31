@@ -62,7 +62,7 @@ FILES_VIVADO=$(FILES)
 INCDIRS_VIVADO=$(INCDIRS)
 endif
 
-.PHONY: bit prog clean s7 debug_paths
+.PHONY: bit prog clean s7 debug_paths interactive_bash
 
 # Default bit target
 bit: $(BITFILE)
@@ -100,3 +100,19 @@ prog: $(BITFILE)
 clean:
 	rm -f *.dcp *.log *.jou  *.rpt filelist.tcl *.bit
 	rm -rf .Xil
+
+# Ouvre un shell interactif dans le conteneur Docker Vivado
+interactive_bash:
+ifeq ($(VIVADO_USE_DOCKER),1)
+	$(DOCKER) run --platform $(VIVADO_DOCKER_PLATFORM) --interactive --tty --rm \
+		-u $(VIVADO_DOCKER_USER) \
+		-v $(VIVADO_DOCKER_SRC_HOST_PATH):$(VIVADO_DOCKER_SRC_PATH):rw \
+		-v $(CURDIR):$(VIVADO_DOCKER_WORK_PATH):rw \
+		-e HOME=$(VIVADO_DOCKER_HOME) \
+		-e DISPLAY= \
+		-e _JAVA_AWT_WM_NONREPARENTING=1 \
+		-e XILINX_LOCAL_USER_DATA=no \
+		$(VIVADO_DOCKER_IMAGE) /bin/bash
+else
+	@echo "[ERROR] VIVADO_USE_DOCKER=0 : Pas de conteneur Docker."
+endif

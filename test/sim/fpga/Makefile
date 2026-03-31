@@ -5,7 +5,10 @@
 SRCS       := src/start.S src/main.c
 APP        := fpga
 CCFLAGS    := -march=rv32im_zicsr -mabi=ilp32 -Os -ffreestanding -nostdlib -nostartfiles -Wl,--no-warn-rwx-segments
-LDSCRIPT   := ../common/memmap_rv.ld
+ifeq ($(DEBUG),1)
+CCFLAGS    += -g -Og
+endif
+LDSCRIPT   := memmap.ld
 INCDIR     := ../common
 MAX_CYCLES := 0    # no run target — test is driven by RVSim
 RV_ROOT    ?= ../../..
