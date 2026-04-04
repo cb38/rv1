@@ -32,6 +32,7 @@ object RVVerilog extends App {
                                                  supportZba = true,
                                                  supportZbb = true,
                                                  supportZbkb = true,
+                                                 supportAtomics = true,
                                                  supportDebug = true,
                                                  bootVector = BigInt("80000040", 16)))).printPruned()
   config.generateVerilog(new DebugModule).printPruned()
@@ -54,6 +55,7 @@ object RVFormalVerilog extends App {
                                                  supportZba = true,
                                                  supportZbb = true,
                                                  supportZbkb = true,
+                                                 supportAtomics = true,
                                                  supportDebug = true,
                                                  bootVector = BigInt("80000040", 16))).setDefinitionName("RV_formal")).printPruned()
 }
@@ -236,6 +238,7 @@ object RVTopVerilog extends App {
                                                  supportZba = true,
                                                  supportZbb = true,
                                                  supportZbkb = true,
+                                                 supportAtomics = true,
                                                  supportDebug = true,
                                                  supportCompressed = true,
                                                  bootVector = BigInt("00000000", 16)))).printPruned()
@@ -260,6 +263,7 @@ object RVTopXilinxVerilog extends App {
                                                  supportZba = true,
                                                  supportZbb = true,
                                                  supportZbkb = true,
+                                                 supportAtomics = true,
                                                  supportDebug = true,
                                                  useXilinxJtag = true,
                                                  supportCompressed = true,
@@ -281,7 +285,7 @@ object RVTopXilinxVerilog extends App {
 //
 // Usage:  sbt "runMain rv.RVSim [test]"
 //   test = "base"  (default)
-//   test = "fpga"
+//   test = "blink"
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Describes one firmware test: its source files, compile flags, and the
@@ -299,7 +303,8 @@ case class RVSimTest(
   srcs     : Seq[String],
   ccFlags  : String,
   ldScript : String,
-  simBody  : (RVTop, Array[BigInt]) => Unit
+  simBody  : (RVTop, Array[BigInt]) => Unit,
+  workDir  : String = "test/sim"   // workspace-relative directory containing this test
 )
 
 /** Compile all sources for the given test into a flat binary.
@@ -311,7 +316,7 @@ object RVSimBuild {
   private val INCDIR  = "test/sim/common"
 
   def build(test: RVSimTest): Array[BigInt] = {
-    val tmpDir  = s"test/sim/${test.name}/tmp"
+    val tmpDir  = s"${test.workDir}/${test.name}/tmp"
     new File(tmpDir).mkdirs()
     val elfFile = s"$tmpDir/${test.name}.elf"
     val binFile = s"$tmpDir/${test.name}.bin"
@@ -348,7 +353,7 @@ object RVSimBuild {
 object RVSimTests {
 
   // Shared linker script used by all bare-metal tests
-  private val LD_RV = "test/sim/common/memmap_rv.ld"
+  private val LD_RV = "soc/sim/common/memmap.ld"
 
   // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -372,7 +377,8 @@ object RVSimTests {
 
   val base = RVSimTest(
     name    = "base",
-    srcs    = Seq("test/sim/base/main.S"),
+    srcs    = Seq("soc/sim/base/main.S"),
+    workDir = "soc/sim",
     ccFlags = "-march=rv32i -mabi=ilp32 -Os -ffreestanding -nostdlib -nostartfiles -Wl,--no-warn-rwx-segments",
     ldScript = LD_RV,
     simBody  = (dut, program) => {
@@ -405,14 +411,15 @@ object RVSimTests {
     }
   )
 
-  // ── "fpga": GPIO blink — LED[2:3] blink while button[0] held ─────────────
+  // ── "blink": GPIO blink — LED[2:3] blink while button[0] held ─────────────
   // Phase 1: button released 400 cyc → led[3:2] must be 0
   // Phase 2: button pressed 2000 cyc → led[3:2] must toggle (BLINK_CLOG2=2)
   // Phase 3: button released 400 cyc → led[3:2] must return to 0
 
-  val fpga = RVSimTest(
-    name    = "fpga",
-    srcs    = Seq("test/sim/fpga/src/start.S", "test/sim/fpga/src/main.c"),
+  val blink = RVSimTest(
+    name    = "blink",
+    srcs    = Seq("soc/sim/blink/src/start.S", "soc/sim/blink/src/main.c"),
+    workDir = "soc/sim",
     ccFlags = "-march=rv32im_zicsr -mabi=ilp32 -Os -ffreestanding -nostdlib -nostartfiles -Wl,--no-warn-rwx-segments -DBLINK_CLOG2=2",
     ldScript = LD_RV,
     simBody  = (dut, program) => {
@@ -421,7 +428,7 @@ object RVSimTests {
 
       dut.clockDomain.waitSampling(400)
       val ledsOff1 = (dut.io.led.write.toLong >> 2) & 3L
-      println(s"[fpga] Phase1 (btn=0, 400 cyc):  led[3:2] = ${ledsOff1.toBinaryString}  (expect 0)")
+      println(s"[blink] Phase1 (btn=0, 400 cyc):  led[3:2] = ${ledsOff1.toBinaryString}  (expect 0)")
 
       dut.io.button.read #= 1
       var ledHi = 0L; var ledLo = 0L
@@ -430,22 +437,67 @@ object RVSimTests {
         val s = (dut.io.led.write.toLong >> 2) & 3L
         if (s != 0L) ledHi += 1 else ledLo += 1
       }
-      println(s"[fpga] Phase2 (btn=1, 2000 cyc): led[3:2] high=$ledHi cyc, low=$ledLo cyc")
+      println(s"[blink] Phase2 (btn=1, 2000 cyc): led[3:2] high=$ledHi cyc, low=$ledLo cyc")
 
       dut.io.button.read #= 0
       dut.clockDomain.waitSampling(400)
       val ledsOff2 = (dut.io.led.write.toLong >> 2) & 3L
-      println(s"[fpga] Phase3 (btn=0, 400 cyc):  led[3:2] = ${ledsOff2.toBinaryString}  (expect 0)")
+      println(s"[blink] Phase3 (btn=0, 400 cyc):  led[3:2] = ${ledsOff2.toBinaryString}  (expect 0)")
 
       val blinkSeen = ledHi > 0 && ledLo > 0
       val pass = (ledsOff1 == 0L) && blinkSeen && (ledsOff2 == 0L)
-      if (pass) println("[fpga] PASS — LEDs blinked while button pressed, off when released")
-      else      println(s"[fpga] FAIL — ledsOff1=$ledsOff1 blinkSeen=$blinkSeen ledsOff2=$ledsOff2")
+      if (pass) println("[blink] PASS — LEDs blinked while button pressed, off when released")
+      else      println(s"[blink] FAIL — ledsOff1=$ledsOff1 blinkSeen=$blinkSeen ledsOff2=$ledsOff2")
+    }
+  )
+
+  // ── "atomics": LR.W / SC.W / AMO*.W smoke test ───────────────────────────
+  // Runs the assembly test that exercises every atomic instruction.
+  // x1 == 0 at end → all passed.  Bits in x1 indicate which sub-test failed.
+
+  val atomics = RVSimTest(
+    name    = "atomics",
+    srcs    = Seq("soc/sim/atomics/main.S"),
+    workDir = "soc/sim",
+    ccFlags = "-march=rv32ia -mabi=ilp32 -Os -ffreestanding -nostdlib -nostartfiles -Wl,--no-warn-rwx-segments",
+    ldScript = LD_RV,
+    simBody  = (dut, program) => {
+      initDut(dut, program)
+      // Run until we reach the final infinite loop (j  1b = opcode 0x0000006F at PC > init)
+      var cycles = 0
+      val maxCycles = 2000
+      var done = false
+      while (cycles < maxCycles && !done) {
+        dut.clockDomain.waitSampling(1)
+        cycles += 1
+        if (dut.core.rv.exec.valid.toBoolean) {
+          val pc   = dut.core.rv.exec.pc.toBigInt
+          val inst = dut.core.rv.exec.instr.toBigInt
+          // Detect the final tight loop: "j 1b" = 0x0000006F
+          if (inst == BigInt("0000006F", 16) && pc > BigInt("80000100", 16)) {
+            done = true
+          }
+        }
+      }
+
+      val x1 = dut.core.rv.RegFile.RegMem.getBigInt(1)
+      println(s"[atomics] Finished after $cycles cycles, x1 = 0x${x1.toString(16)}")
+
+      if (x1 == 0) {
+        println("[atomics] PASS — all 11 atomic sub-tests passed")
+      } else {
+        // Decode which sub-tests failed
+        val names = Seq("LR/SC basic", "SC without LR", "AMOSWAP", "AMOADD",
+                        "AMOXOR", "AMOAND", "AMOOR", "AMOMIN", "AMOMAX",
+                        "AMOMINU", "AMOMAXU")
+        val failures = (0 until 11).filter(i => (x1 & (1 << i)) != 0).map(i => s"#${i+1} ${names(i)}")
+        println(s"[atomics] FAIL — failed: ${failures.mkString(", ")}")
+      }
     }
   )
 
   // ── Registry: add new RVSimTest entries here ──────────────────────────────
-  val all: Map[String, RVSimTest] = Seq(base, fpga).map(t => t.name -> t).toMap
+  val all: Map[String, RVSimTest] = Seq(base, blink, atomics).map(t => t.name -> t).toMap
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -468,6 +520,7 @@ object RVSim extends App {
     .compile(new RVTop(config = RVConfig(
         supportFormal = false,
         supportMulDiv = false,
+        supportAtomics = true,
         InstAddrSize  = 32,
         dataAddrSize  = 32,
         bootVector    = BigInt("80000040", 16))))

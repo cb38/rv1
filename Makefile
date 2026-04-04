@@ -5,17 +5,17 @@
 #   sim            - build cxxrtl testbench + run all simulation tests
 #   sim-tests      - run simulation tests (testbench already built)
 #   sim-tb         - build cxxrtl testbench only
-#   fpga-sim       - run fpga GPIO blink test in SpinalHDL simulator (RVSim)
+#   soc-sim        - run a soc/sim test in SpinalHDL simulator (RVSim)
 #   synth          - synthesise + place & route for Arty S7 (bitfile)
 #   formal         - run riscv-formal checks
 #   clean          - clean generated/build artefacts
 #   help           - print this message
 
-.PHONY: all rtl sim sim-tests sim-tb fpga-sim fpga-fw synth formal clean help load_fpga connect_fpga
+.PHONY: all rtl sim sim-tests sim-tb soc-sim soc-fw synth formal clean help load_fpga connect_fpga
 
 # ── defaults ──────────────────────────────────────────────────────────────────
 BOARD      ?= s7
-SIM_TESTS  ?= base mul_hw irq_csr compressed_c hellow debug bus_error
+SIM_TESTS  ?= mul_hw irq_csr compressed_c hellow debug bus_error atomics ecall
 
 # ── RTL generation ────────────────────────────────────────────────────────────
 rtl:
@@ -43,19 +43,20 @@ sim-test:
 endif
 
 # ── SpinalHDL sim (RVSim) — full SoC with APB peripherals ────────────────────
-# Usage:  make fpga-sim          (runs "fpga" test)
-#         make fpga-sim SIM_TEST=base
-SIM_TEST ?= fpga
-fpga-sim:
-	sbt "runMain rv.RVSim $(SIM_TEST)"
+# Usage:  make soc-sim              (runs "blink" test by default)
+#         make soc-sim SOC_TEST=base
+SOC_TEST ?= blink
+soc-sim:
+	sbt "runMain rv.RVSim $(SOC_TEST)"
 
-# ── FPGA firmware build ──────────────────────────────────────────────────────
-# Compile the bare-metal firmware for the real FPGA (BLINK_CLOG2=23).
+# ── SoC firmware build ────────────────────────────────────────────────────────
+# Compile bare-metal firmware for any test under soc/sim/.
 # Pass DEBUG=1 for GDB-friendly build (-g -Og).
-# Output: test/sim/fpga/tmp/fpga.elf, .bin, .dis
-fpga-fw:
-	$(MAKE) -C test/sim/fpga clean
-	$(MAKE) -C test/sim/fpga bin $(if $(DEBUG),DEBUG=$(DEBUG),)
+# Usage:  make soc-fw              (builds blink by default)
+#         make soc-fw SOC_TEST=base
+soc-fw:
+	$(MAKE) -C soc/sim/$(SOC_TEST) clean
+	$(MAKE) -C soc/sim/$(SOC_TEST) bin $(if $(DEBUG),DEBUG=$(DEBUG),)
 
 # ── FPGA synthesis / implementation ──────────────────────────────────────────
 synth: rtl_fpga
@@ -64,12 +65,14 @@ synth: rtl_fpga
 
 # ── Formal verification ───────────────────────────────────────────────────────
 formal: rtl
-	$(MAKE) -C test/formal/riscv-formal/riscv-formal/cores/RV checks
+	$(MAKE) -C -j8 test/formal/riscv-formal/riscv-formal/cores/RV checks
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 clean:
 	$(MAKE) -C test/sim          clean
-	$(MAKE) -C test/sim/fpga          clean
+	$(MAKE) -C soc/sim/blink     clean
+	$(MAKE) -C soc/sim/base      clean
+	$(MAKE) -C soc/sim/atomics   clean
 	$(MAKE) -C test/sim/tb_cxxrtl clean
 	$(MAKE) -C soc/synth_vivado  clean
 	$(MAKE) -C test/formal/riscv-formal/riscv-formal/cores/RV clean
@@ -82,9 +85,9 @@ help:
 	@echo "  make sim-tb            Build cxxrtl testbench only"
 	@echo "  make sim-tests         Run all cxxrtl sim tests (TB already built)"
 	@echo "  make sim-test TEST=X   Run a single cxxrtl test (e.g. hellow)"
-	@echo "  make fpga-sim          Run full-SoC SpinalHDL sim (SIM_TEST=fpga)"
-	@echo "  make fpga-fw           Compile FPGA firmware (test/sim/fpga/tmp/fpga.elf)"
-	@echo "  make fpga-fw DEBUG=1   … with debug symbols (-g -Og)"
+	@echo "  make soc-sim [SOC_TEST=X]  Run full-SoC SpinalHDL sim (default: blink)"
+	@echo "  make soc-fw  [SOC_TEST=X]  Compile soc/sim/X firmware (default: blink)"
+	@echo "  make soc-fw  DEBUG=1       … with debug symbols (-g -Og)"
 	@echo "  make synth [BOARD=s7]  Vivado synthesis + impl (produces bitfile)"
 	@echo "  make formal            riscv-formal instruction checks"
 	@echo "  make clean             Remove all build artefacts"

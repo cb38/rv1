@@ -3,7 +3,7 @@ file ../libfpga/common/reset_sync.v
 file ../libfpga/common/fpga_reset.v
 file ../libfpga/common/blinky.v
 
-list ../soc/soc.f
+list ../fpga/soc.f
 list ../libfpga/debug/jtag_dtm.f
 
 

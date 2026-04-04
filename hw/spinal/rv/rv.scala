@@ -22,6 +22,7 @@ object Opcodes extends SpinalEnum {
     def ALU         = B"0110011"
     def F           = B"0001111"
     def SYS         = B"1110011"
+    def AMO         = B"0101111"
 }
 
 object InstrFormat extends SpinalEnum(binaryOneHot) {
@@ -50,6 +51,7 @@ object InstrType extends SpinalEnum(binaryOneHot) {
     val E       = newElement()
     val CSR     = newElement()
     val MULDIV  = newElement()
+    val AMO     = newElement()
 }
 
 object CsrCmd extends SpinalEnum(binaryOneHot) {
@@ -246,6 +248,7 @@ case class RVConfig(
                 supportZba      : Boolean = false,
                 supportZbb      : Boolean = false,
                 supportZbkb     : Boolean = false,
+                supportAtomics  : Boolean = false,
                 InstAddrSize    : Int     = 32,
                 dataAddrSize    : Int     = 32,
                 bootVector      : BigInt  = BigInt(0)
@@ -259,6 +262,7 @@ case class RVConfig(
     def hasZba      = supportZba
     def hasZbb      = supportZbb
     def hasZbkb     = supportZbkb
+    def hasAtomics = supportAtomics
     def hasAnyBitmanip = supportZbs || supportZba || supportZbb || supportZbkb
 
     def hasFormal   = supportFormal
@@ -630,6 +634,14 @@ object RVDecode {
             is(Opcodes.F) {
                 r.itype   := InstrType.FENCE
                 r.iformat := InstrFormat.I
+            }
+            if(config.hasAtomics) {
+                is(Opcodes.AMO) {
+                    when(funct3 === B"010") {  // .W operations only
+                        r.itype := InstrType.AMO
+                    }
+                    r.iformat := InstrFormat.R
+                }
             }
             is(Opcodes.SYS){
                 when(funct3 === B"000"){
@@ -1780,13 +1792,152 @@ class RV (config: RVConfig) extends Component {
             
         
     }
-    
+
+    // -----------------------------------------------------------------------
+    // Atomic extension (A) – LR.W / SC.W / AMO*.W
+    //
+    // LR.W:  load word from mem[rs1], set reservation, rd = loaded value
+    // SC.W:  if reservation valid & addr matches → store rs2, rd = 0 (success)
+    //        else → rd = 1 (failure).  Always clears reservation.
+    // AMO:   read-modify-write: load old value from mem[rs1], compute new
+    //        value = op(old, rs2), store back, rd = old value.
+    //        Implemented as a two-phase state machine (load then store).
+    // -----------------------------------------------------------------------
+    val atomic = if(config.hasAtomics) new Area {
+        val isAmo  = (itype === InstrType.AMO) && valid
+        val funct5 = instr(31 downto 27)
+        val isLR     = isAmo && funct5 === B"00010"
+        val isSC     = isAmo && funct5 === B"00011"
+        val isAmoOp  = isAmo && !isLR && !isSC
+
+        val addr    = U(op1(31 downto 0))       // address from rs1
+        val rs2Data = rs2                         // store data from rs2 register
+
+        // Reservation registers (for LR/SC)
+        val reservationValid = RegInit(False)
+        val reservationAddr  = Reg(UInt(30 bits)) // word-aligned, stores bits[31:2]
+
+        // AMO two-phase state machine: False = load phase, True = store phase
+        val amoPhase      = RegInit(False)
+        val amoLoadedData = Reg(Bits(32 bits))
+
+        val rd_wr    = Bool()
+        val rd_wdata = UInt(32 bits)
+        rd_wr   := False
+        rd_wdata := 0
+
+        val amoDone = Bool()
+        amoDone := False
+
+        // Misalignment check: all atomic .W ops require word alignment
+        val amoMisaligned = isAmo && (addr(1 downto 0) =/= 0)
+
+        // ------ AMO result computation (used during store phase) ------
+        val amoResult = Bits(32 bits)
+        val loadedS = S(amoLoadedData)
+        val loadedU = U(amoLoadedData)
+        val rs2S    = S(rs2Data)
+        val rs2U    = U(rs2Data)
+
+        amoResult := rs2Data   // default: AMOSWAP
+        switch(funct5) {
+            is(B"00001") { amoResult := rs2Data }                                     // AMOSWAP
+            is(B"00000") { amoResult := B(loadedU + rs2U) }                           // AMOADD
+            is(B"00100") { amoResult := amoLoadedData ^ rs2Data }                     // AMOXOR
+            is(B"01100") { amoResult := amoLoadedData & rs2Data }                     // AMOAND
+            is(B"01000") { amoResult := amoLoadedData | rs2Data }                     // AMOOR
+            is(B"10000") { amoResult := (loadedS < rs2S) ? amoLoadedData | rs2Data }  // AMOMIN
+            is(B"10100") { amoResult := (loadedS > rs2S) ? amoLoadedData | rs2Data }  // AMOMAX
+            is(B"11000") { amoResult := (loadedU < rs2U) ? amoLoadedData | rs2Data }  // AMOMINU
+            is(B"11100") { amoResult := (loadedU > rs2U) ? amoLoadedData | rs2Data }  // AMOMAXU
+        }
+
+        // ------ LR.W : load word, set reservation ------
+        when(isLR && !amoMisaligned) {
+            dataMemory.ReadData(addr)
+            when(dataMemory.readDone) {
+                amoDone  := True
+                rd_wr    := True
+                rd_wdata := U(dataMemory.rdData)
+                reservationValid := True
+                reservationAddr  := addr(31 downto 2)
+            }
+        }
+
+        // ------ SC.W : conditional store ------
+        when(isSC && !amoMisaligned) {
+            val scSuccess = reservationValid && (reservationAddr === addr(31 downto 2))
+            when(scSuccess) {
+                dataMemory.WriteData(addr, rs2Data, B"10")  // word store
+                when(dataMemory.writeDone) {
+                    amoDone  := True
+                    rd_wr    := True
+                    rd_wdata := 0       // success
+                    reservationValid := False
+                }
+            } otherwise {
+                amoDone  := True
+                rd_wr    := True
+                rd_wdata := 1           // failure
+                reservationValid := False
+            }
+        }
+
+        // ------ AMO ops : load phase → compute → store phase ------
+        when(isAmoOp && !amoMisaligned) {
+            when(!amoPhase) {
+                // Phase 0: load
+                dataMemory.ReadData(addr)
+                when(dataMemory.readDone) {
+                    amoLoadedData := dataMemory.rdData
+                    amoPhase      := True
+                }
+            } otherwise {
+                // Phase 1: store computed result
+                dataMemory.WriteData(addr, amoResult, B"10")
+                when(dataMemory.writeDone) {
+                    amoDone  := True
+                    rd_wr    := True
+                    rd_wdata := U(amoLoadedData)   // return OLD value
+                    amoPhase := False
+                }
+            }
+        }
+
+        // Misaligned AMO: retire immediately as trap (no memory access)
+        when(amoMisaligned) {
+            amoDone := True
+        }
+
+        // Halt execute stage while atomic operation is in progress
+        haltWhen(isAmo && !amoDone && !amoMisaligned)
+
+        // Invalidate reservation on any normal store completion
+        when(itype === InstrType.S && valid && dataMemory.writeDone) {
+            reservationValid := False
+        }
+
+        // Flush overrides everything (highest priority — source-order last)
+        when(flush) {
+            amoPhase         := False
+            reservationValid := False
+        }
+    } else new Area {
+        val rd_wr    = False
+        val rd_wdata = UInt(32 bits)
+        rd_wdata := 0
+        val amoDone      = True
+        val amoMisaligned = False
+    }
+
     val irq = new Area {
     
         val irq_taken = False
         val irq_target = U(0, 32 bits)
         val mret_taken = False
         val mret_target = U(0, 32 bits)
+        val ecall_taken = False
+        val ecall_target = U(0, 32 bits)
         val irqCauseExternal = B(BigInt("8000000B", 16), 32 bits)
         val irqCauseTimer    = B(BigInt("80000007", 16), 32 bits)
         val irqCauseSoftware = B(BigInt("80000003", 16), 32 bits)
@@ -1810,6 +1961,8 @@ class RV (config: RVConfig) extends Component {
         val mtvec_base  = (CsrRegs.mtvec(31 downto 2) ## B"00")
         val mtvec_mode  = CsrRegs.mtvec(1 downto 0)
         val isMret      = (itype === InstrType.E) && (instr(31 downto 20) === B"001100000010")
+        val isEcall     = (itype === InstrType.E) && (instr(31 downto 20) === B"000000000000") && valid
+        val notDbgHalted = if(config.hasDebug) !dbg.halted else True
         when(take_irq){
             irq_taken  := True
             // Vectored mode (mode=1): BASE + 4*cause_code; Direct mode (mode=0): BASE
@@ -1836,6 +1989,20 @@ class RV (config: RVConfig) extends Component {
             mretMstatusNext(12 downto 11) := B"00"
             CsrRegs.mstatus := mretMstatusNext
 
+        }
+
+        // ECALL: synchronous exception, mcause = 11 (environment call from M-mode)
+        when(isEcall && notDbgHalted) {
+            ecall_taken  := True
+            ecall_target := mtvec_base.asUInt
+            CsrRegs.mepc   := pc.asBits   // PC of ecall instruction
+            CsrRegs.mcause := B(11, 32 bits)
+            val ecallMstatus = Bits(32 bits)
+            ecallMstatus                := CsrRegs.mstatus
+            ecallMstatus(7)             := CsrRegs.mstatus(3)  // MPIE = MIE
+            ecallMstatus(3)             := False                // MIE  = 0
+            ecallMstatus(12 downto 11)  := B"11"              // MPP  = M-mode
+            CsrRegs.mstatus             := ecallMstatus
         }
             
     }
@@ -1888,6 +2055,11 @@ class RV (config: RVConfig) extends Component {
         flush      := True
         nextTrapPc := excTarget
         if(config.hasCompressed) { flushTargetBit1 := excTarget(1) }
+    } elsewhen(irq.ecall_taken) {
+        Iptr       := irq.ecall_target
+        flush      := True
+        nextTrapPc := irq.ecall_target
+        if(config.hasCompressed) { flushTargetBit1 := irq.ecall_target(1) }
     } elsewhen(irq.mret_taken){
         Iptr := irq.mret_target
         flush := True
@@ -1915,7 +2087,8 @@ class RV (config: RVConfig) extends Component {
 
         val dbgExecRetire = dbgExec.inFlight && execute.isValid && !flush &&
                             (itype =/= InstrType.L || dataMemory.readDone || lsu.memMisaligned) &&
-                            (itype =/= InstrType.S || dataMemory.writeDone || lsu.memMisaligned)
+                            (itype =/= InstrType.S || dataMemory.writeDone || lsu.memMisaligned) &&
+                            (itype =/= InstrType.AMO || atomic.amoDone || atomic.amoMisaligned)
 
         when(dbgExecRetire) {
             dbgExec.inFlight := False
@@ -1931,7 +2104,8 @@ class RV (config: RVConfig) extends Component {
             !dbgExec.inFlight && !isEbreakToDebug &&
             !irq.irq_taken && !busExc.doTrap &&
             (itype =/= InstrType.L || dataMemory.readDone || lsu.memMisaligned) &&
-            (itype =/= InstrType.S || dataMemory.writeDone || lsu.memMisaligned)
+            (itype =/= InstrType.S || dataMemory.writeDone || lsu.memMisaligned) &&
+            (itype =/= InstrType.AMO || atomic.amoDone || atomic.amoMisaligned)
 
         when(stepRetire) {
             dbg.halted   := True
@@ -2093,7 +2267,7 @@ class RV (config: RVConfig) extends Component {
         }
     }
     
-    val rd_wr    = execute.isValid && (alu.rd_wr | jump.rd_wr | shift.rd_wr | bitmanip.rd_wr | lsu.rd_wr | mul.rd_wr | csr.rd_wr) && (rd_addr =/= 0)
+    val rd_wr    = execute.isValid && (alu.rd_wr | jump.rd_wr | shift.rd_wr | bitmanip.rd_wr | lsu.rd_wr | mul.rd_wr | csr.rd_wr | atomic.rd_wr) && (rd_addr =/= 0)
     val rd_waddr = rd_addr
     val rd_wdata = B((alu.rd_wdata.range      -> alu.rd_wr))      & B(alu.rd_wdata)      |
                    B((jump.rd_wdata.range     -> jump.rd_wr))     & B(jump.rd_wdata)     |
@@ -2101,7 +2275,8 @@ class RV (config: RVConfig) extends Component {
                    B((bitmanip.rd_wdata.range -> bitmanip.rd_wr)) & B(bitmanip.rd_wdata) |
                    B((lsu.rd_wdata.range      -> lsu.rd_wr))      & B(lsu.rd_wdata)      |
                    B((mul.rd_wdata.range      -> mul.rd_wr))      & B(mul.rd_wdata)      |
-                   B((csr.rd_wdata.range      -> csr.rd_wr))      & B(csr.rd_wdata)
+                   B((csr.rd_wdata.range      -> csr.rd_wr))      & B(csr.rd_wdata)      |
+                   B((atomic.rd_wdata.range   -> atomic.rd_wr))   & B(atomic.rd_wdata)
 
     // register file
     RegFile.rd_wr       := rd_wr
@@ -2113,7 +2288,10 @@ class RV (config: RVConfig) extends Component {
         
         val execPc = PC.asUInt.resize(32)
         
-        val rvfiRetire = execute.isValid && !haltRequest && (itype =/= InstrType.L || dataMemory.readDone || lsu.memMisaligned) && (itype =/= InstrType.S || dataMemory.writeDone || lsu.memMisaligned)
+        val rvfiRetire = execute.isValid && !haltRequest &&
+            (itype =/= InstrType.L || dataMemory.readDone || lsu.memMisaligned) &&
+            (itype =/= InstrType.S || dataMemory.writeDone || lsu.memMisaligned) &&
+            (itype =/= InstrType.AMO || atomic.amoDone || atomic.amoMisaligned)
 
         when(rvfiRetire){
             rvfiOrder := rvfiOrder + 1
@@ -2182,7 +2360,20 @@ class RV (config: RVConfig) extends Component {
             }
         }
 
-        // pc_wdata overrides for mret, ebreak, dret
+        // pc_wdata overrides for ecall, mret, ebreak, dret
+        when(irq.ecall_taken) {
+            io.rvfi.pc_wdata := irq.ecall_target
+            io.rvfi.trap     := True
+            // ECALL writes mepc, mcause, mstatus
+            io.rvfi.csr_mepc.report(CsrRegs.mepc, RvfiUtils.FULL_MASK, pc.asBits)
+            io.rvfi.csr_mcause.report(CsrRegs.mcause, RvfiUtils.FULL_MASK, B(11, 32 bits))
+            val ecallMstatus = Bits(32 bits)
+            ecallMstatus                := CsrRegs.mstatus
+            ecallMstatus(7)             := CsrRegs.mstatus(3)
+            ecallMstatus(3)             := False
+            ecallMstatus(12 downto 11)  := B"11"
+            io.rvfi.csr_mstatus.report(CsrRegs.mstatus, RvfiUtils.FULL_MASK, ecallMstatus)
+        }
         when(irq.mret_taken) {
             io.rvfi.pc_wdata := irq.mret_target
         }

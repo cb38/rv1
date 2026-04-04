@@ -1,0 +1,85 @@
+
+tmp/ecall_rv.elf:     format de fichier elf32-littleriscv
+
+Sections :
+Idx Name          Taille    VMA       LMA       Off fich  Algn
+  0 .bootpad      00000040  80000000  80000000  00001000  2**0
+                  ALLOC
+  1 .text         000000c0  80000040  80000040  00001040  2**4
+                  CONTENTS, ALLOC, LOAD, READONLY, CODE
+  2 .riscv.attributes 00000027  00000000  00000000  00001100  2**0
+                  CONTENTS, READONLY
+
+tmp/ecall_rv.elf:     format de fichier elf32-littleriscv
+
+
+Déassemblage de la section .text :
+
+80000040 <_start>:
+80000040:	00000197          	auipc	gp,0x0
+80000044:	7c018193          	addi	gp,gp,1984 # 80000800 <__global_pointer$>
+80000048:	00100117          	auipc	sp,0x100
+8000004c:	fb810113          	addi	sp,sp,-72 # 80100000 <__stack_top>
+80000050:	32005073          	csrwi	mcountinhibit,0
+80000054:	01c000ef          	jal	80000070 <main>
+80000058:	0040006f          	j	8000005c <_exit>
+
+8000005c <_exit>:
+8000005c:	c00002b7          	lui	t0,0xc0000
+80000060:	00828293          	addi	t0,t0,8 # c0000008 <__stack_top+0x3ff00008>
+80000064:	00a2a023          	sw	a0,0(t0)
+80000068:	0000006f          	j	80000068 <_exit+0xc>
+8000006c:	0000                	.insn	2, 0x0000
+	...
+
+80000070 <main>:
+80000070:	00000513          	li	a0,0
+80000074:	00000297          	auipc	t0,0x0
+80000078:	06c28293          	addi	t0,t0,108 # 800000e0 <trap_handler>
+8000007c:	30529073          	csrw	mtvec,t0
+80000080:	30046073          	csrsi	mstatus,8
+80000084:	00000317          	auipc	t1,0x0
+80000088:	00c30313          	addi	t1,t1,12 # 80000090 <ecall_site>
+8000008c:	00000393          	li	t2,0
+
+80000090 <ecall_site>:
+80000090:	00000073          	ecall
+
+80000094 <after_ecall>:
+80000094:	00100293          	li	t0,1
+80000098:	00538463          	beq	t2,t0,800000a0 <.test2>
+8000009c:	00156513          	ori	a0,a0,1
+
+800000a0 <.test2>:
+800000a0:	00b00293          	li	t0,11
+800000a4:	005e0463          	beq	t3,t0,800000ac <.test3>
+800000a8:	00256513          	ori	a0,a0,2
+
+800000ac <.test3>:
+800000ac:	006e8463          	beq	t4,t1,800000b4 <.test4>
+800000b0:	00456513          	ori	a0,a0,4
+
+800000b4 <.test4>:
+800000b4:	000022b7          	lui	t0,0x2
+800000b8:	88828293          	addi	t0,t0,-1912 # 1888 <_start-0x7fffe7b8>
+800000bc:	005f72b3          	and	t0,t5,t0
+800000c0:	00002337          	lui	t1,0x2
+800000c4:	88030313          	addi	t1,t1,-1920 # 1880 <_start-0x7fffe7c0>
+800000c8:	00628463          	beq	t0,t1,800000d0 <.done>
+800000cc:	00856513          	ori	a0,a0,8
+
+800000d0 <.done>:
+800000d0:	00008067          	ret
+800000d4:	00000013          	nop
+800000d8:	00000013          	nop
+800000dc:	00000013          	nop
+
+800000e0 <trap_handler>:
+800000e0:	00100393          	li	t2,1
+800000e4:	34202e73          	csrr	t3,mcause
+800000e8:	34102ef3          	csrr	t4,mepc
+800000ec:	30002f73          	csrr	t5,mstatus
+800000f0:	004e8f93          	addi	t6,t4,4
+800000f4:	341f9073          	csrw	mepc,t6
+800000f8:	30200073          	mret
+800000fc:	00000013          	nop
