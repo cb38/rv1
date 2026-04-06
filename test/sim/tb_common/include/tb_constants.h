@@ -31,6 +31,32 @@ enum {
 	IO_MTIMECMP1H  = 0x114
 };
 
+// UART 8250 compatible registers at IO_BASE + 0x200
+// Linux uses earlycon=uart8250,mmio,0xC0000200
+static const unsigned int UART_BASE = 0xC0000200;
+static const unsigned int UART_VIRT_BASE = 0x10000000;  // QEMU virt UART (byte-spaced, reg-shift=0)
+enum {
+	UART_THR = 0x00,  // Transmit Holding Register (W) / Receive Buffer (R)
+	UART_IER = 0x04,  // Interrupt Enable Register
+	UART_IIR = 0x08,  // Interrupt Identification (R) / FCR (W)
+	UART_LCR = 0x0C,  // Line Control Register
+	UART_MCR = 0x10,  // Modem Control Register
+	UART_LSR = 0x14,  // Line Status Register
+	UART_MSR = 0x18,  // Modem Status Register
+	UART_SCR = 0x1C,  // Scratch Register
+};
+
+// CLINT at standard RISC-V address 0x02000000
+// Layout: msip @+0x0000, mtimecmp @+0x4000, mtime @+0xBFF8
+static const unsigned int CLINT_BASE = 0x02000000;
+enum {
+	CLINT_MSIP       = 0x0000,
+	CLINT_MTIMECMP   = 0x4000,
+	CLINT_MTIMECMPH  = 0x4004,
+	CLINT_MTIME      = 0xBFF8,
+	CLINT_MTIMEH     = 0xBFFC,
+};
+
 typedef enum {
 	SIZE_BYTE = 0,
 	SIZE_HWORD = 1,

@@ -70,15 +70,30 @@ object Op1Kind extends SpinalEnum {
 object CsrReg extends SpinalEnum(binaryOneHot) {
     val NONE       = newElement()
     val MSTATUS    = newElement()
+    val MISA       = newElement()
     val MIE        = newElement()
     val MTVEC      = newElement()
+    val MCOUNTEREN = newElement()
     val MSCRATCH   = newElement()
     val MEPC       = newElement()
     val MCAUSE     = newElement()
+    val MTVAL      = newElement()
     val MIP        = newElement()
     val MCOUNTINHIBIT = newElement()
     val MCYCLE     = newElement()
     val MCYCLEH    = newElement()
+    val MINSTRET   = newElement()
+    val MINSTRETH  = newElement()
+    val MVENDORID  = newElement()
+    val MARCHID    = newElement()
+    val MIMPID     = newElement()
+    val MHARTID    = newElement()
+    val CYCLE      = newElement()
+    val CYCLEH     = newElement()
+    val INSTRET    = newElement()
+    val INSTRETH   = newElement()
+    val TIME       = newElement()
+    val TIMEH      = newElement()
     val DCSR       = newElement()
     val DPC        = newElement()
     val DSCRATCH0  = newElement()
@@ -668,15 +683,32 @@ object RVDecode {
 
 class CsrRegFile(config: RVConfig) extends Area {
     val mstatus  = Reg(Bits(32 bits)) init(0)
+    val priv     = Reg(UInt(2 bits)) init(3)  // Current privilege: 0=U, 3=M
+    // misa: read-only, reports supported extensions
+    //   MXL=01 (32-bit), bits: I(8), M(12), A(0), C(2), U(20)
+    val misaValue = {
+        var v = BigInt(1) << 30   // MXL = 01
+        v |= (BigInt(1) << 8)    // I
+        if(config.hasMulDiv)     v |= (BigInt(1) << 12)  // M
+        if(config.hasAtomics)    v |= (BigInt(1) << 0)   // A
+        if(config.hasCompressed) v |= (BigInt(1) << 2)   // C
+        v |= (BigInt(1) << 20)   // U (user mode)
+        v
+    }
+    val misa     = B(misaValue, 32 bits)
     val mtvec    = Reg(Bits(32 bits)) init(0)
+    val mcounteren = Reg(Bits(32 bits)) init(0)
     val mscratch = Reg(Bits(32 bits)) init(0)
     val mepc     = Reg(Bits(32 bits)) init(0)
     val mcause   = Reg(Bits(32 bits)) init(0)
+    val mtval    = Reg(Bits(32 bits)) init(0)
     val mie      = Reg(Bits(32 bits)) init(0)
     val mip      = Reg(Bits(32 bits)) init(0)
     val mcountinhibit = Reg(Bits(32 bits)) init(B(5, 32 bits))  // bits 0 (cy) and 2 (ir) reset to 1
     val mcycle_lo = Reg(Bits(32 bits)) init(0)
     val mcycle_hi = Reg(Bits(32 bits)) init(0)
+    val minstret_lo = Reg(Bits(32 bits)) init(0)
+    val minstret_hi = Reg(Bits(32 bits)) init(0)
     // Auto-increment mcycle every cycle, unless inhibited by mcountinhibit(0)
     when(!mcountinhibit(0)) {
         val mcycleInc = (mcycle_hi.asUInt @@ mcycle_lo.asUInt) + 1
@@ -691,15 +723,32 @@ class CsrRegFile(config: RVConfig) extends Area {
 
     val csrMap: Seq[(Int, SpinalEnumElement[CsrReg.type], Bits)] = Seq(
         (0x300, CsrReg.MSTATUS,  mstatus),
+        (0x301, CsrReg.MISA,     misa),
         (0x304, CsrReg.MIE,      mie),
         (0x305, CsrReg.MTVEC,    mtvec),
+        (0x306, CsrReg.MCOUNTEREN, mcounteren),
         (0x340, CsrReg.MSCRATCH, mscratch),
         (0x341, CsrReg.MEPC,     mepc),
         (0x342, CsrReg.MCAUSE,   mcause),
+        (0x343, CsrReg.MTVAL,    mtval),
         (0x344, CsrReg.MIP,      mip),
         (0x320, CsrReg.MCOUNTINHIBIT, mcountinhibit),
         (0xB00, CsrReg.MCYCLE,   mcycle_lo),
-        (0xB80, CsrReg.MCYCLEH,  mcycle_hi)
+        (0xB80, CsrReg.MCYCLEH,  mcycle_hi),
+        (0xB02, CsrReg.MINSTRET, minstret_lo),
+        (0xB82, CsrReg.MINSTRETH, minstret_hi),
+        // Machine information CSRs (read-only, return 0)
+        (0xF11, CsrReg.MVENDORID, B(0, 32 bits)),
+        (0xF12, CsrReg.MARCHID,   B(0, 32 bits)),
+        (0xF13, CsrReg.MIMPID,    B(0, 32 bits)),
+        (0xF14, CsrReg.MHARTID,   B(0, 32 bits)),
+        // User-mode read-only shadows of counters
+        (0xC00, CsrReg.CYCLE,     mcycle_lo),
+        (0xC80, CsrReg.CYCLEH,    mcycle_hi),
+        (0xC02, CsrReg.INSTRET,   minstret_lo),
+        (0xC82, CsrReg.INSTRETH,  minstret_hi),
+        (0xC01, CsrReg.TIME,      mcycle_lo),
+        (0xC81, CsrReg.TIMEH,     mcycle_hi)
     ) ++ (if(config.hasDebug) Seq(
         (0x7B0, CsrReg.DCSR,      dcsr),
         (0x7B1, CsrReg.DPC,       dpc),
@@ -717,9 +766,20 @@ class CsrRegFile(config: RVConfig) extends Area {
     def write(sel: SpinalEnumCraft[CsrReg.type], data: Bits): Unit = {
         switch(sel) {
             for((_, e, r) <- csrMap) is(e) {
-                if(e == CsrReg.MIP) { for(i <- 0 until 32 if i != 11 && i != 7 && i != 3) r(i) := data(i) }
+                if(e == CsrReg.MISA) { /* read-only, writes ignored */ }
+                else if(e == CsrReg.MIP) { for(i <- 0 until 32 if i != 11 && i != 7 && i != 3) r(i) := data(i) }
                 else if(e == CsrReg.MCOUNTINHIBIT) { r(0) := data(0); r(2) := data(2) }  // only bits 0 (cy) and 2 (ir) are writable
+                else if(e == CsrReg.MCOUNTEREN) { r(0) := data(0); r(1) := data(1); r(2) := data(2) }  // CY, TM, IR bits
+                else if(e == CsrReg.MSTATUS) {
+                    r := data
+                    // MPP (bits 12:11): only 00 (U) or 11 (M) are valid — no S-mode
+                    r(12 downto 11) := Mux(data(12) && data(11), B"11", B"00")
+                }
                 else if(e == CsrReg.MEPC) { r := data; r(0) := False }  // mepc[0] is always 0 (WARL, RISC-V spec)
+                // Read-only CSRs: mvendorid, marchid, mimpid, mhartid, cycle/h, instret/h — writes ignored
+                else if(e == CsrReg.MVENDORID || e == CsrReg.MARCHID || e == CsrReg.MIMPID || e == CsrReg.MHARTID ||
+                        e == CsrReg.CYCLE || e == CsrReg.CYCLEH || e == CsrReg.INSTRET || e == CsrReg.INSTRETH ||
+                        e == CsrReg.TIME || e == CsrReg.TIMEH) { /* read-only */ }
                 else { r := data }
             }
         }
@@ -1384,7 +1444,13 @@ class RV (config: RVConfig) extends Component {
     val u_imm = S(instr(31 downto 12) ## B((11 downto 0) -> false))
 
     val trap = Bool()
-    trap := (itype === InstrType.Undef) || (csr.regidx === CsrReg.ILLEGAL) || cIllegal
+    // U-mode privilege checks:
+    // 1) CSR access: CSR addr bits [9:8] encode minimum privilege level.
+    //    In U-mode (priv=0), only user-level CSRs (bits [9:8]=00) are accessible.
+    val csrPrivViolation = (CsrRegs.priv === 0) && (iformat === InstrFormat.CSR) && (instr(29 downto 28) =/= B"00")
+    // 2) MRET requires M-mode privilege
+    val mretPrivViolation = (CsrRegs.priv === 0) && (itype === InstrType.E) && (instr(31 downto 20) === B"001100000010")
+    trap := (itype === InstrType.Undef) || (csr.regidx === CsrReg.ILLEGAL) || cIllegal || csrPrivViolation || mretPrivViolation
 
     val rs1_valid =  ((iformat === InstrFormat.R) ||
                 (iformat === InstrFormat.I) ||
@@ -1970,39 +2036,46 @@ class RV (config: RVConfig) extends Component {
             irq_target := Mux(mtvec_mode(0), (mtvec_base.asUInt + (causeCode << 2)).resized, mtvec_base.asUInt)
             CsrRegs.mepc   := nextTrapPc.asBits
             CsrRegs.mcause := irqCauseValue
+            CsrRegs.mtval  := B(0, 32 bits)   // mtval = 0 for interrupts
             val irqMstatusNext = Bits(32 bits)
             irqMstatusNext := CsrRegs.mstatus
             irqMstatusNext(7) := CsrRegs.mstatus(3)
             irqMstatusNext(3) := False
-            irqMstatusNext(12 downto 11) := B"11"
+            irqMstatusNext(12 downto 11) := CsrRegs.priv.asBits.resized  // MPP = current priv
             CsrRegs.mstatus := irqMstatusNext
+            CsrRegs.priv := 3  // switch to M-mode
         
         }
         when(valid && isMret){
             val resume = CsrRegs.mepc.asUInt
             mret_taken  := True
             mret_target := resume
+            CsrRegs.priv := CsrRegs.mstatus(12 downto 11).asUInt  // restore privilege from MPP
             val mretMstatusNext = Bits(32 bits)
             mretMstatusNext := CsrRegs.mstatus
             mretMstatusNext(3) := CsrRegs.mstatus(7)
             mretMstatusNext(7) := True
-            mretMstatusNext(12 downto 11) := B"00"
+            mretMstatusNext(12 downto 11) := B"00"  // MPP = least privilege (U)
             CsrRegs.mstatus := mretMstatusNext
 
         }
 
-        // ECALL: synchronous exception, mcause = 11 (environment call from M-mode)
+        // ECALL: synchronous exception, cause depends on privilege level
+        //   priv=0 (U-mode): mcause = 8 (environment call from U-mode)
+        //   priv=3 (M-mode): mcause = 11 (environment call from M-mode)
         when(isEcall && notDbgHalted) {
             ecall_taken  := True
             ecall_target := mtvec_base.asUInt
             CsrRegs.mepc   := pc.asBits   // PC of ecall instruction
-            CsrRegs.mcause := B(11, 32 bits)
+            CsrRegs.mcause := Mux(CsrRegs.priv === 0, B(8, 32 bits), B(11, 32 bits))
+            CsrRegs.mtval  := B(0, 32 bits)   // mtval = 0 for ecall
             val ecallMstatus = Bits(32 bits)
             ecallMstatus                := CsrRegs.mstatus
             ecallMstatus(7)             := CsrRegs.mstatus(3)  // MPIE = MIE
             ecallMstatus(3)             := False                // MIE  = 0
-            ecallMstatus(12 downto 11)  := B"11"              // MPP  = M-mode
+            ecallMstatus(12 downto 11)  := CsrRegs.priv.asBits.resized  // MPP = current priv
             CsrRegs.mstatus             := ecallMstatus
+            CsrRegs.priv                := 3  // switch to M-mode
         }
             
     }
@@ -2035,12 +2108,68 @@ class RV (config: RVConfig) extends Component {
         when(doTrap) {
             CsrRegs.mepc   := pc.asBits   // faulting instruction PC
             CsrRegs.mcause := trapCause
+            // mtval: faulting address for load/store, 0 for instruction access fault
+            CsrRegs.mtval  := dataBusError ? lsu.lsu_addr.asBits | B(0, 32 bits)
             val excMstatus = Bits(32 bits)
             excMstatus                  := CsrRegs.mstatus
             excMstatus(7)               := CsrRegs.mstatus(3)   // MPIE = MIE
             excMstatus(3)               := False                 // MIE  = 0
-            excMstatus(12 downto 11)    := B"11"                // MPP  = M-mode
+            excMstatus(12 downto 11)    := CsrRegs.priv.asBits.resized  // MPP = current priv
             CsrRegs.mstatus             := excMstatus
+            CsrRegs.priv                := 3  // switch to M-mode
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Illegal instruction exception
+    //   mcause = 2  (illegal instruction)
+    //   mtval  = faulting instruction bits
+    // -----------------------------------------------------------------------
+    val illegalExc = new Area {
+        val notDbgHalted = if(config.hasDebug) !dbg.halted else True
+        val doTrap = decoder.TRAP && execute.isValid && valid && notDbgHalted
+        val mtvec_base = (CsrRegs.mtvec(31 downto 2) ## B"00")
+
+        when(doTrap) {
+            CsrRegs.mepc   := pc.asBits
+            CsrRegs.mcause := B(2, 32 bits)
+            CsrRegs.mtval  := instr         // faulting instruction
+            val excMstatus = Bits(32 bits)
+            excMstatus                  := CsrRegs.mstatus
+            excMstatus(7)               := CsrRegs.mstatus(3)
+            excMstatus(3)               := False
+            excMstatus(12 downto 11)    := CsrRegs.priv.asBits.resized  // MPP = current priv
+            CsrRegs.mstatus             := excMstatus
+            CsrRegs.priv                := 3  // switch to M-mode
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Misaligned load/store/AMO exception
+    //   mcause = 4  Load address misaligned
+    //   mcause = 6  Store/AMO address misaligned
+    //   mtval  = faulting address
+    // -----------------------------------------------------------------------
+    val misalignExc = new Area {
+        val notDbgHalted = if(config.hasDebug) !dbg.halted else True
+        val isLoad  = (itype === InstrType.L) && lsu.memMisaligned
+        val isStore = (itype === InstrType.S) && lsu.memMisaligned
+        val isAmo   = if(config.hasAtomics) atomic.amoMisaligned else False
+        val doTrap  = (isLoad || isStore || isAmo) && execute.isValid && valid && notDbgHalted
+        val mtvec_base = (CsrRegs.mtvec(31 downto 2) ## B"00")
+        val trapCause  = isLoad ? B(4, 32 bits) | B(6, 32 bits)   // 4=load, 6=store/AMO
+
+        when(doTrap) {
+            CsrRegs.mepc   := pc.asBits
+            CsrRegs.mcause := trapCause
+            CsrRegs.mtval  := Mux(isAmo, op1.asBits, lsu.lsu_addr.asBits)
+            val excMstatus = Bits(32 bits)
+            excMstatus                  := CsrRegs.mstatus
+            excMstatus(7)               := CsrRegs.mstatus(3)
+            excMstatus(3)               := False
+            excMstatus(12 downto 11)    := CsrRegs.priv.asBits.resized  // MPP = current priv
+            CsrRegs.mstatus             := excMstatus
+            CsrRegs.priv                := 3  // switch to M-mode
         }
     }
 
@@ -2051,6 +2180,18 @@ class RV (config: RVConfig) extends Component {
         if(config.hasCompressed) { flushTargetBit1 := irq.irq_target(1) }
     } elsewhen(busExc.doTrap) {
         val excTarget = busExc.mtvec_base.asUInt
+        Iptr       := excTarget
+        flush      := True
+        nextTrapPc := excTarget
+        if(config.hasCompressed) { flushTargetBit1 := excTarget(1) }
+    } elsewhen(illegalExc.doTrap) {
+        val excTarget = illegalExc.mtvec_base.asUInt
+        Iptr       := excTarget
+        flush      := True
+        nextTrapPc := excTarget
+        if(config.hasCompressed) { flushTargetBit1 := excTarget(1) }
+    } elsewhen(misalignExc.doTrap) {
+        val excTarget = misalignExc.mtvec_base.asUInt
         Iptr       := excTarget
         flush      := True
         nextTrapPc := excTarget
@@ -2129,6 +2270,13 @@ class RV (config: RVConfig) extends Component {
     val execRetire = execute.isValid && !flush && !haltRequest && (!dataMemory.loadPending || dataMemory.readDone)
     when(execRetire && !jump.take_jump){
         nextTrapPc := pc + instrStep
+    }
+
+    // minstret: increment on every retired instruction, unless inhibited by mcountinhibit(2)
+    when(execRetire && !CsrRegs.mcountinhibit(2)) {
+        val minstretInc = (CsrRegs.minstret_hi.asUInt @@ CsrRegs.minstret_lo.asUInt) + 1
+        CsrRegs.minstret_lo := minstretInc(31 downto 0).asBits
+        CsrRegs.minstret_hi := minstretInc(63 downto 32).asBits
     }
        
    

@@ -31,7 +31,7 @@ int main(void) {
     write_csr(mtvec, (uint32_t)trap_handler);
 
     // --- Test 1: load from wholly unmapped address → mcause = 5 ---
-    volatile uint32_t *unmapped = (volatile uint32_t *)0x10000000u;
+    volatile uint32_t *unmapped = (volatile uint32_t *)0x20000000u;
     g_trap_mcause = 0;
     g_trap_count  = 0;
     (void)*unmapped;

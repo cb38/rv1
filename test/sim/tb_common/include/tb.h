@@ -96,6 +96,7 @@ struct mem_io_state {
 
 	uint8_t soft_irq_state;
 	uint32_t irq_state;
+	bool permissive_io;  // When true, unmapped I/O reads return 0 (no bus error)
 
 	mem_io_state(const tb_cli_args &args);
 

@@ -64,6 +64,15 @@ public:
 	void set_irq(uint32_t mask)      override {top.p_irq.set<bool>(mask != 0);}
 	void set_soft_irq(uint8_t mask)  override {top.p_soft__irq.set<uint32_t>(mask & 0x3u);}
 	void set_timer_irq(uint8_t mask) override {top.p_timer__irq.set<uint32_t>(mask & 0x3u);}
+
+	uint32_t get_pc() { return top.p_cpu_2e_Iptr.get<uint32_t>(); }
+	uint32_t get_exec_pc() {
+		if (top.p_cpu_2e_execute__up__valid.get<bool>())
+			return top.p_cpu_2e_execute__up__PC.get<uint32_t>();
+		return 0;
+	}
+	uint32_t get_exec_instr() { return top.p_cpu_2e_execute__up__DECODED__INSTR.get<uint32_t>(); }
+	bool get_exec_valid() { return top.p_cpu_2e_execute__up__valid.get<bool>(); }
 };
 tb_cxxrtl_top::tb_cxxrtl_top(const tb_cli_args &args): tb_top {args} {
 	if (args.dump_waves) {
@@ -118,8 +127,13 @@ tb_cxxrtl_top::tb_cxxrtl_top(const tb_cli_args &args): tb_top {args} {
 	top.p_tck.set<bool>(false);
 	top.p_trst__n.set<bool>(true);
 	top.p_rst__n.set<bool>(true);
-	top.p_cpu_2e_Iptr.set<uint32_t>(TB_BOOT_PC);
-	top.p_cpu_2e_instrMemory__PcReg.set<uint32_t>(TB_BOOT_PC);
+	uint32_t boot_pc = args.has_boot_pc ? args.boot_pc : TB_BOOT_PC;
+	top.p_cpu_2e_Iptr.set<uint32_t>(boot_pc);
+	top.p_cpu_2e_instrMemory__PcReg.set<uint32_t>(boot_pc);
+	// Set register a1 (x11) = DTB address for Linux kernel boot
+	if (args.has_dtb_addr) {
+		top.memory_p_cpu_2e_RegFile__RegMem[11].set<uint32_t>(args.dtb_addr);
+	}
 	STEP();
 	STEP(); // workaround for github.com/YosysHQ/yosys/issues/2780
 }
@@ -387,14 +401,16 @@ int main(int argc, char **argv) {
 
 	tb_jtag_state jtag(args);
 	mem_io_state memio(args);
-	if (args.load_bin && TB_BOOT_PC >= MEM_BASE && TB_BOOT_PC < MEM_BASE + MEM_SIZE) {
-		uint32_t load_offset = TB_BOOT_PC - MEM_BASE;
+	if (args.load_bin && !args.noshift && TB_BOOT_PC >= MEM_BASE && TB_BOOT_PC < MEM_BASE + MEM_SIZE) {
+		uint32_t actual_boot_pc = args.has_boot_pc ? args.boot_pc : TB_BOOT_PC;
+		uint32_t load_offset = actual_boot_pc - MEM_BASE;
 		memmove(memio.mem + load_offset, memio.mem, MEM_SIZE - load_offset);
 		memset(memio.mem, 0, load_offset);
 	}
 	tb_cxxrtl_top tb(args);
 
 	bool timed_out = false;
+
 	for (int64_t cycle = 0; cycle < args.max_cycles || args.max_cycles == 0; ++cycle) {
 		bool jtag_exit_cmd = jtag.step(tb);
 		memio.step(tb);

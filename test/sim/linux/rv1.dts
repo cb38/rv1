@@ -1,0 +1,71 @@
+/*
+ * Device tree for RV1 — cxxrtl simulation testbench
+ *
+ * Memory map  (testbench tb_memio.cpp):
+ *   0x80000000  16 MiB RAM
+ *   0x02000000  CLINT (standard layout: msip+0x0, mtimecmp+0x4000, mtime+0xBFF8)
+ *   0xC0000200  UART 8250 (32-bit reg spacing)
+ */
+
+/dts-v1/;
+
+/ {
+	#address-cells = <1>;
+	#size-cells = <1>;
+	compatible = "rv1,sim";
+	model = "RV1 Simulation";
+
+	chosen {
+		bootargs = "earlycon=uart8250,mmio32,0xC0000200 console=ttyS0";
+		stdout-path = "/soc/serial@c0000200";
+	};
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		timebase-frequency = <1000000>;  /* 1 MHz — sim cycles as "microseconds" */
+
+		cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+			compatible = "riscv";
+			riscv,isa = "rv32imac_zicsr";
+			mmu-type = "riscv,none";
+			status = "okay";
+
+			cpu0_intc: interrupt-controller {
+				#interrupt-cells = <1>;
+				compatible = "riscv,cpu-intc";
+				interrupt-controller;
+			};
+		};
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x80000000 0x01000000>;  /* 16 MiB */
+	};
+
+	soc {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		compatible = "simple-bus";
+		ranges;
+
+		clint@2000000 {
+			compatible = "riscv,clint0";
+			reg = <0x02000000 0x10000>;
+			interrupts-extended = <&cpu0_intc 3>,  /* M-mode software IRQ */
+			                      <&cpu0_intc 7>;  /* M-mode timer IRQ    */
+		};
+
+		serial@c0000200 {
+			compatible = "ns16550a";
+			reg = <0xC0000200 0x20>;
+			reg-shift = <2>;                       /* registers at 4-byte intervals */
+			clock-frequency = <1000000>;            /* dummy — TX is instant in sim */
+			current-speed = <115200>;
+			status = "okay";
+		};
+	};
+};

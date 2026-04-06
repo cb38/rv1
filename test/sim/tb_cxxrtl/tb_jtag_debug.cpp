@@ -493,7 +493,7 @@ int main(int argc, char **argv) {
 	tb_parse_args(argc, argv, args);
 
 	mem_io_state memio(args);
-	if (args.load_bin && TB_BOOT_PC >= MEM_BASE && TB_BOOT_PC < MEM_BASE + MEM_SIZE) {
+	if (args.load_bin && !args.noshift && TB_BOOT_PC >= MEM_BASE && TB_BOOT_PC < MEM_BASE + MEM_SIZE) {
 		uint32_t load_offset = TB_BOOT_PC - MEM_BASE;
 		memmove(memio.mem + load_offset, memio.mem, MEM_SIZE - load_offset);
 		memset(memio.mem, 0, load_offset);

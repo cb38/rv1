@@ -19,6 +19,11 @@ struct tb_cli_args {
 	std::string jtag_replay_path;
 	std::string log_path;
 	std::string sig_path;
+	bool noshift;
+	uint32_t dtb_addr;
+	bool has_dtb_addr;
+	uint32_t boot_pc;
+	bool has_boot_pc;
 #ifdef CXXRTL_DEBUG_AGENT
 	bool run_agent;
 #endif
@@ -30,6 +35,11 @@ struct tb_cli_args {
 		port = 0;
 		dump_jtag = false;
 		replay_jtag = false;
+		noshift = false;
+		dtb_addr = 0;
+		has_dtb_addr = false;
+		boot_pc = 0;
+		has_boot_pc = false;
 #ifdef CXXRTL_DEBUG_AGENT
 		run_agent = false;
 #endif

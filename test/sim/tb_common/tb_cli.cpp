@@ -22,6 +22,10 @@ static const char *help_str =
 "    --logfile path   : File to write testbench stdout\n"
 "    --sigfile path   : File to write only the data from --dump commands\n"
 "                       (hex, 32 bits per line, same as riscv-arch-test)\n"
+"    --noshift        : Load binary at RAM base (0x80000000) without shifting\n"
+"                       to boot PC. For loading Linux kernel images.\n"
+"    --dtb-addr addr  : Set register a1 to addr at boot (DTB pointer for Linux)\n"
+"    --bootpc addr    : Override boot PC address (default 0x80000040)\n"
 #ifdef CXXRTL_DEBUG_AGENT
 "    --debug          : Run CXXRTL debugger\n"
 #endif
@@ -97,6 +101,20 @@ void tb_parse_args(int argc, char **argv, tb_cli_args &args) {
 			if (argc - i < 2)
 				exit_help("Option --port requires an argument\n");
 			args.port = std::stol(argv[i + 1], 0, 0);
+			i += 1;
+		} else if (s == "--noshift") {
+			args.noshift = true;
+		} else if (s == "--dtb-addr") {
+			if (argc - i < 2)
+				exit_help("Option --dtb-addr requires an argument\n");
+			args.dtb_addr = std::stoul(argv[i + 1], 0, 0);
+			args.has_dtb_addr = true;
+			i += 1;
+		} else if (s == "--bootpc") {
+			if (argc - i < 2)
+				exit_help("Option --bootpc requires an argument\n");
+			args.boot_pc = std::stoul(argv[i + 1], 0, 0);
+			args.has_boot_pc = true;
 			i += 1;
 		} else if (s == "--cpuret") {
 			args.propagate_return_code = true;

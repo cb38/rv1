@@ -15,7 +15,7 @@
 
 # ── defaults ──────────────────────────────────────────────────────────────────
 BOARD      ?= s7
-SIM_TESTS  ?= mul_hw irq_csr compressed_c hellow debug bus_error atomics ecall
+SIM_TESTS  ?= mul_hw irq_csr compressed_c hellow debug bus_error atomics ecall misalign
 
 # ── RTL generation ────────────────────────────────────────────────────────────
 rtl:

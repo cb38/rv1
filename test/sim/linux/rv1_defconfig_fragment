@@ -1,0 +1,66 @@
+# ─────────────────────────────────────────────────────────────────────────
+# Linux kernel configuration fragment for RV1 nommu simulation
+# Apply on top of rv32_nommu_virt_defconfig:
+#   make ARCH=riscv rv32_nommu_virt_defconfig
+#   scripts/kconfig/merge_config.sh .config <this-file>
+# ─────────────────────────────────────────────────────────────────────────
+
+# Core: M-mode, no MMU
+CONFIG_RISCV_M_MODE=y
+CONFIG_NONPORTABLE=y
+CONFIG_MMU=n
+CONFIG_ARCH_RV32I=y
+
+# Serial console — 8250 UART
+CONFIG_SERIAL_8250=y
+CONFIG_SERIAL_8250_CONSOLE=y
+CONFIG_SERIAL_EARLYCON=y
+CONFIG_SERIAL_OF_PLATFORM=y
+
+# Force our command line with keep_bootcon so earlycon stays active
+CONFIG_CMDLINE="earlycon=uart8250,mmio,0x10000000,115200n8 console=ttyS0 keep_bootcon loglevel=7 clocksource=jiffies"
+CONFIG_CMDLINE_FORCE=y
+
+# Timer — CLINT
+CONFIG_RISCV_TIMER=y
+
+# Built-in DTB — our DTS is compiled into the kernel, no bootloader needed
+CONFIG_BUILTIN_DTB=y
+
+# Initramfs
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_INITRAMFS_SOURCE=""
+
+# Minimal kernel
+CONFIG_MODULES=n
+CONFIG_PRINTK=y
+CONFIG_NET=n
+CONFIG_WIRELESS=n
+CONFIG_SOUND=n
+CONFIG_DRM=n
+CONFIG_FB=n
+CONFIG_INPUT=n
+CONFIG_HID=n
+CONFIG_USB=n
+CONFIG_EXT2_FS=n
+CONFIG_EXT4_FS=n
+CONFIG_TMPFS=y
+CONFIG_PROC_FS=y
+CONFIG_SYSFS=y
+CONFIG_DEBUG_INFO=n
+CONFIG_DEBUG_KERNEL=n
+CONFIG_SMP=n
+CONFIG_PREEMPT_NONE=y
+
+# Reduce size
+CONFIG_CC_OPTIMIZE_FOR_SIZE=y
+CONFIG_SLOB=y
+CONFIG_KALLSYMS=n
+CONFIG_BUG=n
+CONFIG_FUTEX=n
+CONFIG_EPOLL=n
+CONFIG_SIGNALFD=n
+CONFIG_TIMERFD=n
+CONFIG_EVENTFD=n
+CONFIG_AIO=n
+CONFIG_ADVISE_SYSCALLS=n

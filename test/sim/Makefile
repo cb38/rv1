@@ -5,7 +5,7 @@
 #   make rv       - generate Verilog only
 #   make tb_build - build testbench only
 
-TESTS := mul_hw irq_csr compressed_c hellow debug bus_error atomics ecall
+TESTS := mul_hw irq_csr compressed_c hellow debug bus_error atomics ecall misalign
 
 RV_ROOT    := ../..
 RV_GEN_CMD := sbt "runMain rv.RVVerilog"
@@ -19,6 +19,7 @@ EXPECT_debug        := 0
 EXPECT_bus_error    := 0
 EXPECT_atomics      := 0
 EXPECT_ecall        := 0
+EXPECT_misalign     := 0
 
 .PHONY: all rv tb_build run clean $(TESTS)
 
